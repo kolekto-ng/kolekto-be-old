@@ -18,12 +18,22 @@ export const createCollection = async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Validate amount
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 100) {
+        return res.status(400).json({ error: 'Amount must be greater than ₦100' });
+    }
+
+    // Validate deadline
+    if (!deadline || isNaN(Date.parse(deadline)) || new Date(deadline) <= new Date()) {
+        return res.status(400).json({ error: 'Deadline must be a valid date in the future' });
+    }
+
     // Use authenticated user's ID as organizer_id
     const user_id = req.user.sub; // or req.user.id, depending on your JWT payloa
 
     // Calculate amount breakdown
     let amountbreakdown = {};
-    const parsedAmount = parseFloat(amount);
     if (!isNaN(parsedAmount)) {
         let kolektoFeePercentage;
         if (parsedAmount < 1000) {
@@ -52,20 +62,6 @@ export const createCollection = async (req, res) => {
                     : parsedAmount,
         };
     }
-
-    // Set initial values for financial fields
-    // const gross_payment = parsedAmount || 0;
-    // const net_payment = gross_payment - (amountbreakdown.totalFees || 0);
-    // const balance = net_payment;
-    // const withdrawn = 0;
-
-    //     const gross_payment = parseFloat(amount) || 0;
-    // const total_fees = amountbreakdown.totalFees || 0;
-    // const net_payment = gross_payment - total_fees;
-    // const withdrawn = 0;
-    // const balance = net_payment - withdrawn; // On creation, this is just net_payment
-
-    // balance = net_payment - withdrawn
 
     // Set initial values for financial fields
     const gross_payment = 0;
