@@ -11,11 +11,15 @@ const supabase = createClient(
 
 // Test connection
 (async () => {
-    const { data, error } = await supabase.rpc('now'); // 'now' is a built-in Postgres function
+    const { data, error } = await supabase
+        .from('collections') // Use a table that exists in your DB
+        .select('id')
+        .limit(1);
+
     if (error) {
         console.error("Supabase connection failed:", error.message);
     } else {
-        console.log("Supabase connected! Server time:", data);
+        console.log("Supabase connected! Sample data:", data);
     }
 })();
 
