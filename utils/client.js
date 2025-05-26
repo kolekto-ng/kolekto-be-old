@@ -3,12 +3,20 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
 dotenv.config();
-console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
-
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
     process.env.SUPABASE_ANON_KEY // Use service role key for admin access
 );
+
+// Test connection
+(async () => {
+    const { data, error } = await supabase.rpc('now'); // 'now' is a built-in Postgres function
+    if (error) {
+        console.error("Supabase connection failed:", error.message);
+    } else {
+        console.log("Supabase connected! Server time:", data);
+    }
+})();
 
 export { supabase };
