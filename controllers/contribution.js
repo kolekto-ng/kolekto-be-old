@@ -1,5 +1,28 @@
 import { supabase } from "../utils/client.js";
 
+// Get contributions, optionally filtered by collectionId
+export const getContributions = async (req, res) => {
+    const { collectionId } = req.query;
+
+    let query = supabase
+        .from("contributions")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+    if (collectionId) {
+        query = query.eq("collection_id", collectionId);
+    }
+
+    const { data, error } = await query;
+    console.log(data,);
+
+    if (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+
+    return res.status(200).json({ success: true, data });
+};
+
 export const getSingleCollection = async (req, res) => {
     const { collectionId } = req.query;
     console.log(`Fetching collection with ID: ${collectionId}`);

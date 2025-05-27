@@ -1,7 +1,8 @@
 import express from "express";
 // Adjusted to match existing controller
-import { createCollection, getSingleCollection, getUserCollections } from "../controllers/collection.js";
+import { createCollection, getUserCollections } from "../controllers/collection.js";
 import verifyToken from "../utils/verifyToken.js";
+import { getSingleCollection } from "../controllers/contribution.js";
 
 const router = express.Router();
 
@@ -11,6 +12,8 @@ router.post("/create-collection", verifyToken, createCollection);
 router.get("/collections", verifyToken, getUserCollections);
 // router.get("/collections/:id", verifyToken, getSingleCollection);
 // router.get("/contribute/collection/:id", getSingleCollection);
+router.get("/collection", getSingleCollection);
+
 
 // Contributor routes
 // router.post("/:id/contributors", createContributor); // Public for contribution
