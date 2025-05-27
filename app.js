@@ -28,7 +28,7 @@ app.use(cookieParser());
 app.use("/api", contributorRouter);
 // app.use("/api/auth", user);
 app.use("/api", collectorRouter);
-app.use("/api", paymentRouter);
+app.use("/api/payments", paymentRouter);
 // app.use("/api", withdrawalRouter);
 
 const port = process.env.PORT || 5000;

@@ -19,9 +19,10 @@ export const getSingleCollection = async (req, res) => {
 
 // Create a new contribution (contributor)
 export const createContribution = async (req, res) => {
-    const { name, email, phone, amount, contributionInformation } = req.body;
-    const { id: collectionId } = req.params;
-    console.log(req.params, collectionId, 'collectionId in createContribution');
+    const { name, email, phone, amount, contributionInformation, collectionId } = req.body.contributor;
+    console.log(req.params, collectionId, contributionInformation, 'collectionId in createContribution');
+
+    // const collectionId= req.params.id;
 
     // Parse contributionInformation || []; if needed
     // let parsedParticipantInfo = contributionInformation || [];
@@ -113,19 +114,15 @@ export const createContribution = async (req, res) => {
         if (contributorError) {
             throw new Error(contributorError.message);
         }
-
-        // Mock payment response (replace with real payment integration)
-        const paymentResponse = {
-            authorization_url: `https://checkout.paystack.com/mock_${contributor.id}`,
-            access_code: `mock_${contributor.id}`,
-            reference: `ref_${contributor.id}`,
-        };
-
+        return {
+            contributor,
+            contributorId: contributor.id,
+        }
         res.status(201).json({
             success: true,
             message: "Contributor added, payment initialized",
             contributor,
-            payment: paymentResponse,
+            contributorId: contributor.id,
         });
     } catch (error) {
         console.error("Error in createContribution:", error);
