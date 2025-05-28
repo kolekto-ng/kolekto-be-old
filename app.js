@@ -16,7 +16,13 @@ app.use(
             "https://www.kolekto.com.ng",
             "www.kolekto.com.ng",
             "http://localhost:8080",
-            "https://staging-kolekto-fe.vercel.app"
+            "https://staging-kolekto-fe.vercel.app",
+            "https://test.kolekto.com.ng",
+            "test.kolekto.com.ng",
+            "https://kolekto-fe.vercel.app",
+            "kolekto-fe.vercel.app",
+            "https://kolekto.com.ng",
+            "kolekto.com.ng",
         ],
         credentials: true, // Allow credentials (cookies) to be sent
     })
