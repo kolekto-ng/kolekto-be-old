@@ -1,16 +1,9 @@
 import { supabase } from '../utils/client.js';
 
 export const createCollection = async (req, res) => {
-    const { title,
-        description,
-        amount,
-        deadline,
-        max_contributions,
-        contributions_fields,
-        status,
-        fee_bearer,
-        currency,
-        currency_symbol,
+    const {
+        title, description, amount, deadline, max_contributions,
+        contributions_fields, status, fee_bearer, currency, currency_symbol,
         generate_unique_codes, code_prefix,
     } = req.body;
 
@@ -29,8 +22,7 @@ export const createCollection = async (req, res) => {
         return res.status(400).json({ error: 'Deadline must be a valid date in the future' });
     }
 
-    // Use authenticated user's ID as organizer_id
-    const user_id = req.user.sub; // or req.user.id, depending on your JWT payloa
+    const user_id = req.user.sub;
 
     // Calculate amount breakdown
     let amountbreakdown = {};
@@ -53,6 +45,8 @@ export const createCollection = async (req, res) => {
         const totalFees = platformFee + gatewayFee;
 
         amountbreakdown = {
+            amount: parsedAmount,
+            fee_bearer: fee_bearer || 'organizer',
             platformFee,
             paymentGatewayFee: gatewayFee,
             totalFees,
@@ -70,13 +64,15 @@ export const createCollection = async (req, res) => {
     const withdrawn = 0;
     const total_fees = 0;
 
-    const { data, error } = await supabase
+    // 1. Create collection
+    const { data: collection, error } = await supabase
         .from('collections')
         .insert([{
             user_id,
             title,
             description,
             amount: parsedAmount,
+            type: "normal",
             deadline,
             code_prefix: code_prefix || null,
             max_contributions,
@@ -85,22 +81,39 @@ export const createCollection = async (req, res) => {
             fee_bearer: fee_bearer || 'organizer',
             currency: currency || 'NGN',
             currency_symbol: currency_symbol || '₦',
-            amount_breakdown: amountbreakdown,
-            gross_payment,
-            net_payment,
-            balance,
-            withdrawn,
-            total_fees,
             total_contributions: 0,
         }])
         .select()
         .single();
 
     if (error) {
+        console.log(error, 'error ecoored colelc')
         return res.status(500).json({ error: error.message });
     }
 
-    return res.status(201).json({ collection: data });
+    // 2. Create wallet for this collection
+    const { error: walletError } = await supabase
+        .from('wallets')
+        .insert([{
+            collection_id: collection.id,
+            available_balance: 0,
+            ledger_balance: 0,
+            withdrawn: 0,
+            fee_breakdown: amountbreakdown,
+            currency: collection.currency,
+            currency_symbol: collection.currency_symbol,
+        }]);
+
+    // 3. Rollback if wallet creation fails
+    if (walletError) {
+        // Delete the collection to rollback
+        console.log(walletError, 'error ecoored wallet error')
+
+        await supabase.from('collections').delete().eq('id', collection.id);
+        return res.status(500).json({ error: "Collection created but wallet creation failed: " + walletError.message });
+    }
+
+    return res.status(201).json({ collection });
 };
 
 export const getUserCollections = async (req, res) => {
@@ -109,7 +122,20 @@ export const getUserCollections = async (req, res) => {
 
     const { data, error } = await supabase
         .from('collections')
-        .select('*')
+        .select(`
+            *,
+            wallets (
+                id,
+                available_balance,
+                ledger_balance,
+                gross_payment,
+                net_payment,
+                withdrawn,
+                fee_breakdown,
+                currency,
+                currency_symbol
+            )
+        `)
         .eq('user_id', user_id);
     // console.log('Data fetched:', data);
 
@@ -126,9 +152,22 @@ export const getSingleCollection = async (req, res) => {
 
     const { data, error } = await supabase
         .from('collections')
-        .select('*')
+        .select(`
+            *,
+            wallets (
+                id,
+                available_balance,
+                ledger_balance,
+                gross_payment,
+                net_payment,
+                withdrawn,
+                fee_breakdown,
+                currency,
+                currency_symbol
+            )
+        `)
         .eq('id', id)
-        .eq('user_id', user_id) // Ensures user can only access their own collection
+        .eq('user_id', user_id)
         .single();
 
     if (error) {
