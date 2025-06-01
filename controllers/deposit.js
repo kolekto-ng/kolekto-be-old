@@ -71,7 +71,6 @@ export async function updateWalletStats(collectionId, amount) {
         netToAdd = Number(amount) - Number(wallet.fee_breakdown.totalFees);
         if (netToAdd < 0) netToAdd = 0;
         console.log(amount, netToAdd, 'netToAdd in updateWalletStats1');
-
     }
 
     console.log(amount, netToAdd, 'netToAdd in updateWalletStats--2');
@@ -91,6 +90,21 @@ export async function updateWalletStats(collectionId, amount) {
             ledger_balance: newLedgerBalance
         })
         .eq("id", wallet.id);
+
+    // Fetch current total_contributions
+    const { data: collection } = await supabase
+        .from("collections")
+        .select("total_contributions")
+        .eq("id", collectionId)
+        .single();
+
+    await supabase
+        .from("collections")
+        .update({
+            total_contributions: (collection.total_contributions || 0) + 1
+        })
+        .eq("id", collectionId);
+
 }
 
 // Initialize Paystack secret key from environment variables
@@ -363,14 +377,6 @@ export const verifyPayment = async (req, res) => {
                     .update({ status: "paid" })
                     .eq("id", deposit.contributor_id);
             }
-
-            // After updating the contribution to status: "paid"
-            await supabase
-                .from("collections")
-                .update({
-                    total_contributions: (collection.total_contributions || 0) + 1
-                })
-                .eq("id", deposit.collection_id);
         }
 
         // Fetch contributor and collection for response
@@ -488,13 +494,7 @@ export const handleWebhook = async (req, res) => {
                 // Generate next sequence number, padded to 3 digits
                 const nextNumber = String((count || 0) + 1).padStart(3, '0');
                 const uniqueCode = `${collection.code_prefix}_${nextNumber}`;
-                // After updating the contribution to status: "paid"
-                await supabase
-                    .from("collections")
-                    .update({
-                        total_contributions: (collection.total_contributions || 0) + 1
-                    })
-                    .eq("id", deposit.collection_id);
+
                 await supabase
                     .from("contributions")
                     .update({
@@ -503,15 +503,6 @@ export const handleWebhook = async (req, res) => {
                     })
                     .eq("id", deposit.contributor_id);
             } else {
-
-                // After updating the contribution to status: "paid"
-                await supabase
-                    .from("collections")
-                    .update({
-                        total_contributions: (collection.total_contributions || 0) + 1
-                    })
-                    .eq("id", deposit.collection_id);
-
                 await supabase
                     .from("contributions")
                     .update({ status: "paid" })

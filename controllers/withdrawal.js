@@ -22,8 +22,6 @@ export const requestWithdrawal = async (req, res) => {
         .eq("collection_id", collection_id)
         .single();
 
-    console.log(wallet, 'wallet in requestWithdrawal');
-
     if (!wallet || amount > wallet.available_balance) {
         return res.status(400).json({ error: "Insufficient balance" });
     }
@@ -88,18 +86,23 @@ export const requestWithdrawal = async (req, res) => {
         }
 
         // 3. Initiate transfer
-        const transferRes = await axios.post(
-            "https://api.paystack.co/transfer",
-            {
-                source: "balance",
-                amount: Math.round(amount * 100), // Paystack expects kobo
-                recipient: recipientCode,
-                reason: "Withdrawal from Kolekto"
-            },
-            { headers: paystackHeaders }
-        );
-        const transferData = transferRes.data.data;
+        // const transferRes = await axios.post(
+        //     "https://api.paystack.co/transfer",
+        //     {
+        //         source: "balance",
+        //         amount: Math.round(amount * 100), // Paystack expects kobo
+        //         recipient: recipientCode,
+        //         reason: "Withdrawal from Kolekto"
+        //     },
+        //     { headers: paystackHeaders }
+        // );
+        // const transferData = transferRes.data.data;
 
+        // Generate a random transfer code
+        function generateTransferCode() {
+            return "TRF_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+        }
+        const transferCode = generateTransferCode();
         // 4. Save withdrawal record (status: pending)
         await supabase.from("withdrawals").insert([{
             user_id: userId,
@@ -111,21 +114,24 @@ export const requestWithdrawal = async (req, res) => {
                 bankCode,
                 accountName
             },
-            paystack_transfer_code: transferData.transfer_code,
+            paystack_transfer_code: transferCode,
             paystack_recipient_code: recipientCode,
             wallet_id: wallet.id
         }]);
 
         // 5. Deduct from wallet.available_balance immediately
-        await supabase
+        const wal = await supabase
             .from("wallets")
             .update({
                 available_balance: wallet.available_balance - amount
             })
             .eq("id", wallet.id);
+        console.log(wal, 'wallet in requestWithdrawal');
 
-        return res.status(200).json({ success: true, transfer: transferData });
+        return res.status(200).json({ success: true, wallet });
     } catch (error) {
+        console.log("Error in requestWithdrawal:", error);
+
         return res.status(500).json({ error: error.response?.data?.message || error.message });
     }
 };
@@ -194,4 +200,90 @@ export const handlePaystackWebhook = async (req, res) => {
     }
 
     res.status(200).send("OK");    // Respond to Paystack    res.status(200).send("OK");
+};
+
+export const getCollectionWalletWithdrawals = async (req, res) => {
+    const { collection_id } = req.query;
+
+    // 1. Get the wallet for this collection
+    const { data: wallet, error: walletError } = await supabase
+        .from("wallets")
+        .select("id")
+        .eq("collection_id", collection_id)
+        .single();
+
+    if (walletError || !wallet) {
+        return res.status(404).json({ error: "Wallet not found for this collection" });
+    }
+
+    // 2. Fetch all withdrawals for this wallet, including collection and wallet details
+    const { data: withdrawals, error } = await supabase
+        .from("withdrawals")
+        .select(`
+            *,
+            collections (
+                id,
+                title,
+                code_prefix,
+                currency,
+                currency_symbol
+            ),
+            wallets (
+                id,
+                available_balance,
+                ledger_balance,
+                gross_payment,
+                net_payment,
+                withdrawn,
+                total_fees,
+                fee_breakdown,
+                total_contributions,
+                currency,
+                currency_symbol,
+                fee_bearer
+            )
+        `)
+        .eq("wallet_id", wallet.id);
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    return res.status(200).json({ withdrawals });
+};
+
+export const getUserWithdrawals = async (req, res) => {
+    const userId = req.user.sub; // or req.user.id, depending on your auth
+
+    // Fetch all withdrawals for this user, including collection and wallet details
+    const { data: withdrawals, error } = await supabase
+        .from("withdrawals")
+        .select(`
+            *,
+            collections (
+                id,
+                title,
+                code_prefix,
+                currency,
+                currency_symbol
+            ),
+            wallets (
+                id,
+                available_balance,
+                ledger_balance,
+                gross_payment,
+                net_payment,
+                withdrawn,
+                fee_breakdown,
+                currency,
+                currency_symbol
+            )
+        `)
+        .eq("user_id", userId);
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    return res.status(200).json({ withdrawals });
 };
