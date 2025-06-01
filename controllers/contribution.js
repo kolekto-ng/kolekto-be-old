@@ -29,7 +29,20 @@ export const getSingleCollection = async (req, res) => {
 
     const { data, error } = await supabase
         .from('collections')
-        .select('*')
+        .select(`
+            *,
+            wallets (
+                id,
+                available_balance,
+                ledger_balance,
+                gross_payment,
+                net_payment,
+                withdrawn,
+                fee_breakdown,
+                currency,
+                currency_symbol
+            )
+        `)
         .eq('id', collectionId)
         .single();
 

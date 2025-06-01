@@ -5,7 +5,7 @@ import cookieParser from "cookie-parser";
 import collectorRouter from "./routes/collection.js";
 import paymentRouter from "./routes/payment.js";
 import contributorRouter from "./routes/contribution.js";
-// import withdrawalRouter from "./routes/withdrawal.js";
+import withdrawalRouter from "./routes/withdrawal.js";
 dotenv.config();
 
 const app = express();
@@ -35,7 +35,7 @@ app.use("/api", contributorRouter);
 // app.use("/api/auth", user);
 app.use("/api", collectorRouter);
 app.use("/api/payments", paymentRouter);
-// app.use("/api", withdrawalRouter);
+app.use("/api/withdrawals", withdrawalRouter);
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => {

@@ -5,7 +5,7 @@ import {
     listTransactions,
     fetchTransaction,
     handleWebhook
-} from "../controllers/payment.js";
+} from "../controllers/deposit.js";
 
 const router = express.Router();
 
