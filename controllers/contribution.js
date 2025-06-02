@@ -14,7 +14,6 @@ export const getContributions = async (req, res) => {
     }
 
     const { data, error } = await query;
-    console.log(data,);
 
     if (error) {
         return res.status(500).json({ success: false, message: error.message });
@@ -25,7 +24,6 @@ export const getContributions = async (req, res) => {
 
 export const getSingleCollection = async (req, res) => {
     const { collectionId } = req.query;
-    console.log(`Fetching collection with ID: ${collectionId}`);
 
     const { data, error } = await supabase
         .from('collections')
@@ -56,7 +54,6 @@ export const getSingleCollection = async (req, res) => {
 // Create a new contribution (contributor)
 export const createContribution = async (req, res) => {
     const { name, email, phone, amount, contributionInformation, collectionId } = req.body.contributor;
-    console.log(req.params, collectionId, contributionInformation, 'collectionId in createContribution');
 
     // const collectionId= req.params.id;
 
