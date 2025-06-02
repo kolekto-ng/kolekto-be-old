@@ -126,11 +126,9 @@ export const requestWithdrawal = async (req, res) => {
                 available_balance: wallet.available_balance - amount
             })
             .eq("id", wallet.id);
-        console.log(wal, 'wallet in requestWithdrawal');
 
         return res.status(200).json({ success: true, wallet });
     } catch (error) {
-        console.log("Error in requestWithdrawal:", error);
 
         return res.status(500).json({ error: error.response?.data?.message || error.message });
     }

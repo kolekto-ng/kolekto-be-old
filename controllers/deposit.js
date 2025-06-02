@@ -65,15 +65,12 @@ export async function updateWalletStats(collectionId, amount) {
 
     // Determine net amount to add based on fee_bearer and fee_breakdown in wallet
     let netToAdd = Number(amount);
-    console.log(wallet, 'wallet in updateWalletStats');
 
     if (wallet.fee_breakdown && typeof wallet.fee_breakdown.totalFees === "number") {
         netToAdd = Number(amount) - Number(wallet.fee_breakdown.totalFees);
         if (netToAdd < 0) netToAdd = 0;
-        console.log(amount, netToAdd, 'netToAdd in updateWalletStats1');
     }
 
-    console.log(amount, netToAdd, 'netToAdd in updateWalletStats--2');
 
     // Calculate new values
     const newGrossPayment = Number(wallet.gross_payment || 0) + Number(amount);
@@ -126,9 +123,6 @@ export const initializePayment = async (req, res) => {
         return res.status(400).json({ error: "Missing required fields" });
     }
 
-    console.log(`Initializing payment for ${fullName} (${email}) with amount: ${amount} for collection ID: ${collectionId}`);
-
-
     let contributorId = null;
     let paymentId = null;
 
@@ -140,7 +134,6 @@ export const initializePayment = async (req, res) => {
         req.params.collectionId = collectionId;
 
         const contributionResult = await createContribution(req, res);
-        console.log(contributionResult, 'contributor in initializePayment');
 
         if (res.headersSent) return;
 
@@ -169,9 +162,6 @@ export const initializePayment = async (req, res) => {
             },
             { headers: paystackHeaders }
         );
-
-        console.log(`Paystack response for ${fullName}:`, response);
-
 
         const paystackData = response.data.data;
 
@@ -276,8 +266,6 @@ export const verifyPayment = async (req, res) => {
             supabase.from("collections").select("*").eq("id", existingDeposit.collection_id).single()
         ]);
 
-        console.log(contributor.contributor_information);
-
         const participants = [
             {
                 id: contributor?.id,
@@ -341,7 +329,6 @@ export const verifyPayment = async (req, res) => {
 
             // --- Update collection stats here ---
             if (deposit.collection_id && deposit.amount > 0) {
-                console.log(deposit, 'deposit in verifyPayment');
 
                 await updateWalletStats(deposit.collection_id, deposit.amount);
             }
@@ -447,7 +434,7 @@ export const fetchTransaction = async (req, res) => {
 // Handle Paystack webhook (for payment events)
 export const handleWebhook = async (req, res) => {
     const event = req.body;
-    console.log('webhook event received:', event);
+    console.log('webhook event received: deposit', event);
 
     // Only handle successful charges
     if (event.event === "charge.success") {

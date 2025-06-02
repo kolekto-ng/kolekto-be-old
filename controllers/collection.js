@@ -87,7 +87,6 @@ export const createCollection = async (req, res) => {
         .single();
 
     if (error) {
-        console.log(error, 'error ecoored colelc')
         return res.status(500).json({ error: error.message });
     }
 
@@ -107,7 +106,6 @@ export const createCollection = async (req, res) => {
     // 3. Rollback if wallet creation fails
     if (walletError) {
         // Delete the collection to rollback
-        console.log(walletError, 'error ecoored wallet error')
 
         await supabase.from('collections').delete().eq('id', collection.id);
         return res.status(500).json({ error: "Collection created but wallet creation failed: " + walletError.message });
@@ -118,7 +116,6 @@ export const createCollection = async (req, res) => {
 
 export const getUserCollections = async (req, res) => {
     const user_id = req.user.sub; // or req.user.id, depending on your JWT payload
-    console.log(user_id, 'user_id in getUserCollections');
 
     const { data, error } = await supabase
         .from('collections')
@@ -137,7 +134,6 @@ export const getUserCollections = async (req, res) => {
             )
         `)
         .eq('user_id', user_id);
-    // console.log('Data fetched:', data);
 
     if (error) {
         return res.status(500).json({ error: error.message });
