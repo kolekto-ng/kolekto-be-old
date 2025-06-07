@@ -18,6 +18,7 @@ app.use(
             "http://localhost:8080",
             "http://localhost:8081",
             "https://staging-kolekto-fe.vercel.app",
+            "https://kolekto-admin-control-panel.vercel.app",
             "https://test.kolekto.com.ng",
             "test.kolekto.com.ng",
             "https://kolekto-fe.vercel.app",
