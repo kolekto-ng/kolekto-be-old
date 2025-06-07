@@ -68,6 +68,7 @@ export const requestWithdrawal = async (req, res) => {
                     name: accountName,
                     account_number: accountNumber,
                     bank_code: bankCode,
+                    bank_name: userBankName,
                     currency: "NGN"
                 },
                 { headers: paystackHeaders }
@@ -80,6 +81,7 @@ export const requestWithdrawal = async (req, res) => {
                 account_number: accountNumber,
                 bank_code: bankCode,
                 account_name: accountName,
+                bank_name: userBankName,
                 recipient_code: recipientCode,
                 currency: "NGN"
             }]);
@@ -112,7 +114,8 @@ export const requestWithdrawal = async (req, res) => {
             destination_account: {
                 accountNumber,
                 bankCode,
-                accountName
+                accountName,
+                bank_name: userBankName
             },
             paystack_transfer_code: transferCode,
             paystack_recipient_code: recipientCode,
@@ -284,4 +287,111 @@ export const getUserWithdrawals = async (req, res) => {
     }
 
     return res.status(200).json({ withdrawals });
+};
+
+export const approveWithdrawal = async (req, res) => {
+    const { id: withdrawal_id } = req.body;
+    console.log(withdrawal_id, 'approving withdrawal');
+
+    // 1. Fetch the withdrawal record
+    const { data: withdrawal, error: withdrawalError } = await supabase
+        .from("withdrawals")
+        .select("*")
+        .eq("id", withdrawal_id)
+        .single();
+
+    if (withdrawalError || !withdrawal) {
+        return res.status(404).json({ error: "Withdrawal not found" });
+    }
+
+    // 2. Check if it's already approved
+    if (withdrawal.status === "success") {
+        return res.status(400).json({ error: "Withdrawal already approved" });
+    }
+
+    // 3. Fetch the wallet
+    const { data: wallet, error: walletError } = await supabase
+        .from("wallets")
+        .select("*")
+        .eq("id", withdrawal.wallet_id)
+        .single();
+
+    if (walletError || !wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+    }
+
+    // 4. Update the withdrawal status and adjust the wallet
+    const updatedWithdrawn = Number(wallet.withdrawn || 0) + Number(withdrawal.amount);
+    const updatedLedgerBalance = Number(wallet.ledger_balance || 0) - Number(withdrawal.amount);
+
+    const { error: updateError } = await supabase
+        .from("wallets")
+        .update({
+            withdrawn: updatedWithdrawn,
+            ledger_balance: updatedLedgerBalance
+        })
+        .eq("id", wallet.id);
+
+    if (updateError) {
+        return res.status(500).json({ error: "Failed to update wallet balances" });
+    }
+
+    await supabase
+        .from("withdrawals")
+        .update({ status: "success" })
+        .eq("id", withdrawal.id);
+
+    return res.status(200).json({ success: true, message: "Withdrawal approved and wallet updated successfully" });
+};
+
+export const rejectWithdrawal = async (req, res) => {
+    const { id: withdrawal_id } = req.body;
+
+    // 1. Fetch the withdrawal record
+    const { data: withdrawal, error: withdrawalError } = await supabase
+        .from("withdrawals")
+        .select("*")
+        .eq("id", withdrawal_id)
+        .single();
+
+    if (withdrawalError || !withdrawal) {
+        return res.status(404).json({ error: "Withdrawal not found" });
+    }
+
+    // 2. Check if it's already rejected
+    if (withdrawal.status === "rejected") {
+        return res.status(400).json({ error: "Withdrawal already rejected" });
+    }
+
+    // 3. Fetch the wallet
+    const { data: wallet, error: walletError } = await supabase
+        .from("wallets")
+        .select("*")
+        .eq("id", withdrawal.wallet_id)
+        .single();
+
+    if (walletError || !wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+    }
+
+    // 4. Refund the available balance
+    const updatedAvailableBalance = Number(wallet.available_balance || 0) + Number(withdrawal.amount);
+
+    const { error: updateError } = await supabase
+        .from("wallets")
+        .update({
+            available_balance: updatedAvailableBalance
+        })
+        .eq("id", wallet.id);
+
+    if (updateError) {
+        return res.status(500).json({ error: "Failed to update wallet balances" });
+    }
+
+    await supabase
+        .from("withdrawals")
+        .update({ status: "rejected" })
+        .eq("id", withdrawal.id);
+
+    return res.status(200).json({ success: true, message: "Withdrawal rejected and available balance refunded successfully" });
 };
