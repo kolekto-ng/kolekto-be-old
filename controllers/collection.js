@@ -41,7 +41,7 @@ export const createCollection = async (req, res) => {
             kolektoFeePercentage = 0.015;
         }
 
-        let gatewayFee = parsedAmount * 0.015;
+        let gatewayFee = (parsedAmount * 0.015) + 100; // 1.5% + ₦100
         gatewayFee = Math.min(gatewayFee, 2000);
 
         const platformFee = parsedAmount * kolektoFeePercentage;
