@@ -1,6 +1,7 @@
 import { supabase } from '../utils/client.js';
 
 export const createCollection = async (req, res) => {
+
     const {
         title, description, amount, deadline, max_contributions,
         contributions_fields, status, fee_bearer, currency, currency_symbol,
