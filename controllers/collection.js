@@ -2,8 +2,6 @@ import { supabase } from '../utils/client.js';
 
 export const createCollection = async (req, res) => {
 
-    return res.status(403).json({ error: 'This endpoint is temporarily disabled' });
-
     const {
         title, description, amount, deadline, max_contributions,
         contributions_fields, status, fee_bearer, currency, currency_symbol,
@@ -41,8 +39,16 @@ export const createCollection = async (req, res) => {
             kolektoFeePercentage = 0.015;
         }
 
-        let gatewayFee = (parsedAmount * 0.015) + 100; // 1.5% + ₦100
+        let gatewayFee = parsedAmount * 0.015;
+
+        // Add ₦100 only if amount is ₦2500 or more
+        if (parsedAmount >= 2500) {
+            gatewayFee += 100;
+        }
+
+        // Cap fee at ₦2000 max
         gatewayFee = Math.min(gatewayFee, 2000);
+
 
         const platformFee = parsedAmount * kolektoFeePercentage;
         const totalFees = platformFee + gatewayFee;
