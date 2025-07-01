@@ -41,11 +41,6 @@ export const createCollection = async (req, res) => {
 
         let gatewayFee = parsedAmount * 0.015;
 
-        // Add ₦100 only if amount is ₦2500 or more
-        if (parsedAmount >= 2500) {
-            gatewayFee += 100;
-        }
-
         // Cap fee at ₦2000 max
         gatewayFee = Math.min(gatewayFee, 2000);
 
