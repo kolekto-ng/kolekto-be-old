@@ -21,7 +21,7 @@ router.get("/transactions", listTransactions);
 // Fetch a single transaction by ID
 router.get("/transaction/:id", fetchTransaction);
 
-// Paystack webhook endpoint
+// Paystack verify payment webhook endpoint
 router.post("/webhook", handleWebhook);
 
 export default router;
