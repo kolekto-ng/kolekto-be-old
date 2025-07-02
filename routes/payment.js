@@ -6,6 +6,7 @@ import {
     fetchTransaction,
     handleWebhook
 } from "../controllers/deposit.js";
+import { verifyPaystackIP } from "../middleware/verifyPaystickIp.js";
 
 const router = express.Router();
 
@@ -22,6 +23,6 @@ router.get("/transactions", listTransactions);
 router.get("/transaction/:id", fetchTransaction);
 
 // Paystack verify payment webhook endpoint
-router.post("/webhook", handleWebhook);
+router.post("/webhook", verifyPaystackIP, handleWebhook);
 
 export default router;
