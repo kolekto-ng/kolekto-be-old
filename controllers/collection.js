@@ -53,7 +53,7 @@ export const createCollection = async (req, res) => {
             amount: parsedAmount,
             fee_bearer: fee_bearer || 'organizer',
             platformFee: kolektoFee,
-            platformGatewayFee: gatewayFee,
+            paymentGatewayFee: gatewayFee,
             totalFees,
             totalPayable:
                 fee_bearer === 'contributor'
