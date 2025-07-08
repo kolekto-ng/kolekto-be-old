@@ -26,33 +26,34 @@ export const createCollection = async (req, res) => {
     const user_id = req.user.sub;
 
     // Calculate amount breakdown
-    let amountbreakdown = {};
+    let amountBreakdown = {};
+
     if (!isNaN(parsedAmount)) {
-        let kolektoFeePercentage;
+        let kolektoFee;
+
         if (parsedAmount < 1000) {
-            kolektoFeePercentage = 0.03;
-        } else if (parsedAmount < 5000) {
-            kolektoFeePercentage = 0.025;
-        } else if (parsedAmount < 20000) {
-            kolektoFeePercentage = 0.02;
+            kolektoFee = 30;
+        } else if (parsedAmount <= 5000) {
+            kolektoFee = 50;
+        } else if (parsedAmount <= 10000) {
+            kolektoFee = 100;
+        } else if (parsedAmount <= 20000) {
+            kolektoFee = 200;
         } else {
-            kolektoFeePercentage = 0.015;
+            kolektoFee = Math.min(parsedAmount * 0.01, 2000);
         }
 
         let gatewayFee = parsedAmount * 0.015;
-
-        // Cap fee at ₦2000 max
         gatewayFee = Math.min(gatewayFee, 2000);
 
+        const totalFees = kolektoFee + gatewayFee;
 
-        const platformFee = parsedAmount * kolektoFeePercentage;
-        const totalFees = platformFee + gatewayFee;
 
-        amountbreakdown = {
+        amountBreakdown = {
             amount: parsedAmount,
             fee_bearer: fee_bearer || 'organizer',
-            platformFee,
-            paymentGatewayFee: gatewayFee,
+            platformFee: kolektoFee,
+            platformGatewayFee: gatewayFee,
             totalFees,
             totalPayable:
                 fee_bearer === 'contributor'
@@ -102,7 +103,7 @@ export const createCollection = async (req, res) => {
             available_balance: 0,
             ledger_balance: 0,
             withdrawn: 0,
-            fee_breakdown: amountbreakdown,
+            fee_breakdown: amountBreakdown,
             currency: collection.currency,
             currency_symbol: collection.currency_symbol,
         }]);
