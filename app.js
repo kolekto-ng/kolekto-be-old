@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
+import authRouter from "./routes/auth.js";
 import collectorRouter from "./routes/collection.js";
 import paymentRouter from "./routes/payment.js";
 import contributorRouter from "./routes/contribution.js";
@@ -36,7 +37,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.use("/api", contributorRouter);
-// app.use("/api/auth", user);
+app.use("/api/auth", authRouter);
 app.use("/api", collectorRouter);
 app.use("/api/payments", paymentRouter);
 app.use("/api/withdrawals", withdrawalRouter);
