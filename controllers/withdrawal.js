@@ -254,7 +254,7 @@ export const getCollectionWalletWithdrawals = async (req, res) => {
 };
 
 export const getUserWithdrawals = async (req, res) => {
-    const userId = req.user.sub; // or req.user.id, depending on your auth
+    const userId = req.user.id; // or req.user.id, depending on your auth
 
     // Fetch all withdrawals for this user, including collection and wallet details
     const { data: withdrawals, error } = await supabase

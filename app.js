@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
+import authRouter from "./routes/auth.js";
 import collectorRouter from "./routes/collection.js";
 import paymentRouter from "./routes/payment.js";
 import contributorRouter from "./routes/contribution.js";
@@ -17,6 +18,7 @@ app.use(
             "www.kolekto.com.ng",
             "http://localhost:8080",
             "http://localhost:8081",
+            "http://localhost:5173",
             "https://staging-kolekto-fe.vercel.app",
             "https://kolekto-admin-control-panel.vercel.app",
             "https://test.kolekto.com.ng",
@@ -36,7 +38,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.use("/api", contributorRouter);
-// app.use("/api/auth", user);
+app.use("/api/auth", authRouter);
 app.use("/api", collectorRouter);
 app.use("/api/payments", paymentRouter);
 app.use("/api/withdrawals", withdrawalRouter);

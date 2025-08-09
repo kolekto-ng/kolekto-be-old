@@ -120,7 +120,9 @@ export const createCollection = async (req, res) => {
 };
 
 export const getUserCollections = async (req, res) => {
-    const user_id = req.user.sub; // or req.user.id, depending on your JWT payload
+
+    const user_id = req.user.id; // or req.user.id, depending on your JWT payload
+    console.log(user_id, "user id");
 
     const { data, error } = await supabase
         .from('collections')
