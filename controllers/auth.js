@@ -3,7 +3,6 @@ import { supabase } from '../utils/client.js';
 // Sign In
 export const signIn = async (req, res) => {
     const { email, password } = req.body;
-    console.log(email, password, "email and password");
 
     if (!email || !password) {
         return res.status(400).json({ error: "Email and password are required." });
@@ -11,7 +10,6 @@ export const signIn = async (req, res) => {
 
     try {
         const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-        console.log(data, "data");
 
         if (error) {
             console.log(error, "error");
@@ -37,7 +35,7 @@ export const signIn = async (req, res) => {
 
         // Return user data without tokens (tokens are in cookies)
         return res.status(200).json({
-            user: data.user,
+            data,
             message: "Successfully signed in"
         });
     } catch (err) {
@@ -174,7 +172,6 @@ export const getCurrentUser = async (req, res) => {
     try {
         // Get token from cookies or headers
         let token = req.cookies?.access_token;
-        console.log(token, "token");
 
         if (!token) {
             const authHeader = req.headers.authorization;
@@ -204,7 +201,6 @@ export const getCurrentUser = async (req, res) => {
 // Sign In (Token-based for cross-domain)
 export const signInWithToken = async (req, res) => {
     const { email, password } = req.body;
-    console.log(email, password, "email and password");
 
     if (!email || !password) {
         return res.status(400).json({ error: "Email and password are required." });

@@ -291,7 +291,6 @@ export const getUserWithdrawals = async (req, res) => {
 
 export const approveWithdrawal = async (req, res) => {
     const { id: withdrawal_id } = req.body;
-    console.log(withdrawal_id, 'approving withdrawal');
 
     // 1. Fetch the withdrawal record
     const { data: withdrawal, error: withdrawalError } = await supabase
