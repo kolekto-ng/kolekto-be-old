@@ -46,15 +46,17 @@ export const signIn = async (req, res) => {
 
 // Sign Up
 export const signUp = async (req, res) => {
-    const { email, password, fullName } = req.body;
+    const { email, password, fullName, phoneNumber } = req.body;
     if (!email || !password || !fullName) {
         return res.status(400).json({ error: "Email, password, and full name are required." });
     }
+
     const { data, error } = await supabase.auth.signUp({
         email,
         password,
+        phone: phoneNumber,
         options: {
-            data: { full_name: fullName }
+            data: { full_name: fullName, phone: phoneNumber }
         }
     });
     if (error) {
