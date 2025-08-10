@@ -14,9 +14,6 @@ export default async function verifyToken(req, res, next) {
         }
     }
 
-    console.log("Verifying token...", token);
-
-
     if (!token) {
         return res.status(401).json({ error: "No token provided" });
     }
