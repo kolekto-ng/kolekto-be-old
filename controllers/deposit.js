@@ -432,83 +432,115 @@ export const fetchTransaction = async (req, res) => {
 };
 
 // Handle Paystack webhook (for payment events)
+import crypto from "node:crypto"; // Ensures Node built-in is used
+
+// Helper: Verify Paystack signature (works in Node and edge runtimes)
+async function verifyPaystackSignature(req) {
+    const payload = JSON.stringify(req.body);
+    const signature = req.headers["x-paystack-signature"];
+
+    // Try Node.js crypto first
+    if (crypto?.createHmac) {
+        const hash = crypto
+            .createHmac("sha512", PAYSTACK_SECRET_KEY)
+            .update(payload)
+            .digest("hex");
+        return hash === signature;
+    }
+
+    // Fallback: Web Crypto API (for edge/serverless runtimes)
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+        "raw",
+        encoder.encode(PAYSTACK_SECRET_KEY),
+        { name: "HMAC", hash: "SHA-512" },
+        false,
+        ["sign"]
+    );
+    const sigBuffer = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
+    const hashHex = Array.from(new Uint8Array(sigBuffer))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+    return hashHex === signature;
+}
+
 export const handleWebhook = async (req, res) => {
+    console.log("webhook event received: deposit", req.body);
+
+    const isValid = await verifyPaystackSignature(req);
+    if (!isValid) {
+        return res.status(403).json({ error: "Invalid signature" });
+    }
+
     const event = req.body;
-    console.log('webhook event received: deposit', event);
-    //validate event
-    const hash = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY).update(JSON.stringify(req.body)).digest('hex');
-    if (hash == req.headers['x-paystack-signature']) {
-        // Retrieve the request's body
 
-        // Only handle successful charges
-        if (event.event === "charge.success") {
-            const reference = event.data.reference;
+    // Only handle successful charges
+    if (event.event === "charge.success") {
+        const reference = event.data.reference;
 
-            // Fetch payment by reference
-            const { data: deposit, error } = await supabase
-                .from("deposits")
-                .select("*")
-                .eq("payment_reference", reference)
+        // Fetch payment by reference
+        const { data: deposit, error } = await supabase
+            .from("deposits")
+            .select("*")
+            .eq("payment_reference", reference)
+            .single();
+
+        if (error || !deposit) {
+            return res.status(404).json({ error: "Payment not found" });
+        }
+
+        // If already marked as success, do nothing
+        if (deposit.status === "success") {
+            return res.status(200).send("Already processed");
+        }
+
+        // Update deposit status
+        await supabase
+            .from("deposits")
+            .update({ status: "success", updated_at: new Date() })
+            .eq("id", deposit.id);
+
+        // Update contribution status
+        if (deposit.contributor_id) {
+            const { data: collection } = await supabase
+                .from("collections")
+                .select("code_prefix")
+                .eq("id", deposit.collection_id)
                 .single();
 
-            if (error || !deposit) {
-                return res.status(404).json({ error: "Payment not found" });
-            }
+            const { count } = await supabase
+                .from("contributions")
+                .select("id", { count: "exact", head: true })
+                .eq("collection_id", deposit.collection_id)
+                .eq("status", "paid");
 
-            // If already marked as success, do nothing (idempotent)
-            if (deposit.status === "success") {
-                return res.status(200).send("Already processed");
-            }
+            if (collection && collection.code_prefix) {
+                const nextNumber = String((count || 0) + 1).padStart(3, "0");
+                const uniqueCode = `${collection.code_prefix}_${nextNumber}`;
 
-            // Update deposit status
-            await supabase
-                .from("deposits")
-                .update({ status: "success", updated_at: new Date() })
-                .eq("id", deposit.id);
-
-            // Optionally update contribution status
-            if (deposit.contributor_id) {
-                // Fetch the collection to check for code_prefix
-                const { data: collection } = await supabase
-                    .from("collections")
-                    .select("code_prefix")
-                    .eq("id", deposit.collection_id)
-                    .single();
-
-                // Fetch the number of contributors for this collection
-                const { count, error: countError } = await supabase
+                await supabase
                     .from("contributions")
-                    .select("id", { count: "exact", head: true })
-                    .eq("collection_id", deposit.collection_id)
-                    .eq("status", "paid");
-                if (collection && collection.code_prefix) {
-                    // Generate next sequence number, padded to 3 digits
-                    const nextNumber = String((count || 0) + 1).padStart(3, '0');
-                    const uniqueCode = `${collection.code_prefix}_${nextNumber}`;
-
-                    await supabase
-                        .from("contributions")
-                        .update({
-                            status: "paid",
-                            contributor_unique_code: uniqueCode
-                        })
-                        .eq("id", deposit.contributor_id);
-                } else {
-                    await supabase
-                        .from("contributions")
-                        .update({ status: "paid" })
-                        .eq("id", deposit.contributor_id);
-                }
+                    .update({
+                        status: "paid",
+                        contributor_unique_code: uniqueCode
+                    })
+                    .eq("id", deposit.contributor_id);
+            } else {
+                await supabase
+                    .from("contributions")
+                    .update({ status: "paid" })
+                    .eq("id", deposit.contributor_id);
             }
-
-            // Update collection stats
-            await updateWalletStats(deposit.collection_id, deposit.amount);
         }
+
+        // Update collection stats
+        await updateWalletStats(deposit.collection_id, deposit.amount);
     }
 
     // Always respond quickly to Paystack
     res.status(200).send("Webhook received");
 };
+
 // Export all controllers
 export default {
     initializePayment,
