@@ -22,6 +22,7 @@ export const signIn = async (req, res) => {
             secure: process.env.NODE_ENV === 'production', // HTTPS only in production
             sameSite: 'none', // Allow cross-site cookies
             maxAge: 60 * 60 * 1000, // 1 hour
+            path: '/',
             domain: process.env.NODE_ENV === 'production' ? '.kolekto.com.ng' : undefined // Set domain for production
         });
 
@@ -29,6 +30,7 @@ export const signIn = async (req, res) => {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
             sameSite: 'none', // Allow cross-site cookies
+            path: '/',
             maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
             domain: process.env.NODE_ENV === 'production' ? '.kolekto.com.ng' : undefined // Set domain for production
         });
@@ -46,9 +48,9 @@ export const signIn = async (req, res) => {
 
 // Sign Up
 export const signUp = async (req, res) => {
-    const { email, password, fullName, phoneNumber } = req.body;
-    if (!email || !password || !fullName) {
-        return res.status(400).json({ error: "Email, password, and full name are required." });
+    const { email, password, firstName, lastName, phoneNumber } = req.body;
+    if (!email || !password || !firstName || !lastName || !phoneNumber) {
+        return res.status(400).json({ error: "Email, password, first name and last name are required." });
     }
 
     const { data, error } = await supabase.auth.signUp({
@@ -56,7 +58,11 @@ export const signUp = async (req, res) => {
         password,
         phone: phoneNumber,
         options: {
-            data: { full_name: fullName, phone: phoneNumber }
+            data: {
+                phone: phoneNumber,
+                first_name: firstName,
+                last_name: lastName
+            }
         }
     });
     if (error) {
