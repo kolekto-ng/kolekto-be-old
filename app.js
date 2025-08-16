@@ -7,9 +7,12 @@ import collectorRouter from "./routes/collection.js";
 import paymentRouter from "./routes/payment.js";
 import contributorRouter from "./routes/contribution.js";
 import withdrawalRouter from "./routes/withdrawal.js";
+import helmet from "helmet";
 dotenv.config();
 
 const app = express();
+
+app.use(helmet());
 
 app.use(
     cors({
