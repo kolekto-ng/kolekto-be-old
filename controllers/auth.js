@@ -57,6 +57,7 @@ export const signUp = async (req, res) => {
         email,
         password,
         phone: phoneNumber,
+        displayName: `${firstName} ${lastName}`,
         options: {
             data: {
                 phone: phoneNumber,
