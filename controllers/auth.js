@@ -57,12 +57,13 @@ export const signUp = async (req, res) => {
         email,
         password,
         phone: phoneNumber,
-        displayName: `${firstName} ${lastName}`,
         options: {
             data: {
                 phone: phoneNumber,
                 first_name: firstName,
-                last_name: lastName
+                last_name: lastName,
+                full_name: `${firstName} ${lastName}`,
+
             }
         }
     });
