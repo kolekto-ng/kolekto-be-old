@@ -16,6 +16,19 @@ export const signIn = async (req, res) => {
             return res.status(400).json({ error: error.message });
         }
 
+        // Fetch user profile data
+        const { data: profile, error: profileError } = await supabase
+            .from('profiles') // Replace 'profiles' with your actual profile table name
+            .select('*') // Select the fields you want to return
+            .eq('id', data.user.id) // Assuming profile id matches user id
+            .single();
+
+        if (profileError) {
+            console.log('Profile fetch error:', profileError);
+            // You might want to continue without profile data or return an error
+            // For now, we'll continue without profile data
+        }
+
         // Set HTTP-only cookies for session management
         res.cookie('access_token', data.session.access_token, {
             httpOnly: true,
@@ -35,9 +48,12 @@ export const signIn = async (req, res) => {
             domain: process.env.NODE_ENV === 'production' ? '.kolekto.com.ng' : undefined // Set domain for production
         });
 
-        // Return user data without tokens (tokens are in cookies)
+        // Return user data with profile information
         return res.status(200).json({
-            data,
+            data: {
+                ...data,
+                profile: profile || null // Include profile data if available
+            },
             message: "Successfully signed in"
         });
     } catch (err) {
@@ -201,7 +217,24 @@ export const getCurrentUser = async (req, res) => {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        return res.status(200).json({ user: data.user });
+        // Fetch user profile data
+        const { data: profile, error: profileError } = await supabase
+            .from('profiles') // Replace 'profiles' with your actual profile table name
+            .select('*') // Select the fields you want to return
+            .eq('id', data.user.id) // Assuming profile id matches user id
+            .single();
+
+        if (profileError) {
+            console.log('Profile fetch error:', profileError);
+            // Continue without profile data or handle as needed
+        }
+
+        return res.status(200).json({
+            user: {
+                ...data.user, ...profile
+            },
+            profile: profile || null
+        });
     } catch (err) {
         console.error('Get current user error:', err);
         return res.status(500).json({ error: "Internal server error" });
