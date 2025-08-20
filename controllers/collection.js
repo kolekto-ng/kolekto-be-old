@@ -258,7 +258,7 @@ export const getUserCollections = async (req, res) => {
                 : null
         }));
 
-        return res.status(200).json({ collections: formatted });
+        return res.status(200).json({ ...formatted, data });
     } catch (err) {
         console.error("Error fetching user collections:", err);
         return res.status(500).json({ error: "Unexpected server error" });
