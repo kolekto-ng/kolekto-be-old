@@ -14,7 +14,7 @@ export const createCollection = async (req, res) => {
         currency,
         currency_symbol,
         code_prefix,
-        pricing_tiers, // <-- array of tiers if tiered
+        price_tiers, // <-- array of tiers if tiered
     } = req.body;
 
     // ------------------------
@@ -36,11 +36,11 @@ export const createCollection = async (req, res) => {
     let collectionType = "flat"; // default
     let parsedAmount = null;
 
-    if (pricing_tiers && Array.isArray(pricing_tiers) && pricing_tiers.length > 0) {
+    if (price_tiers && Array.isArray(price_tiers) && price_tiers.length > 0) {
         collectionType = "tiered";
 
         // Validate each pricing tier
-        for (let tier of pricing_tiers) {
+        for (let tier of price_tiers) {
             if (!tier.name || !tier.price) {
                 return res.status(400).json({ error: "Each tier must have a name and a price" });
             }
@@ -110,7 +110,7 @@ export const createCollection = async (req, res) => {
         // ----------- Tiered collection fees -----------
         amountBreakdown = {
             type: "tiered",
-            tiers: pricing_tiers.map((tier) => {
+            tiers: price_tiers.map((tier) => {
                 let kolektoFee;
 
                 if (tier.price < 1000) {
@@ -169,7 +169,7 @@ export const createCollection = async (req, res) => {
                     total_contributions: 0,
                     price_tiers:
                         collectionType === "tiered"
-                            ? pricing_tiers.map((tier) => ({
+                            ? price_tiers.map((tier) => ({
                                 name: tier.name,
                                 description: tier.description || "",
                                 price: parseFloat(tier.price),
@@ -250,7 +250,7 @@ export const getUserCollections = async (req, res) => {
         // Format response
         const formatted = data.map(collection => ({
             ...collection,
-            pricing_tiers: collection.type === "tiered"
+            price_tiers: collection.type === "tiered"
                 ? collection.pricing_tiers || []
                 : [],
             amountBreakdown: collection.type === "flat"
@@ -296,7 +296,7 @@ export const getSingleCollection = async (req, res) => {
 
         const collection = {
             ...data,
-            pricing_tiers: data.type === "tiered"
+            price_tiers: data.type === "tiered"
                 ? data.pricing_tiers || []
                 : [],
             amountBreakdown: data.type === "flat"
