@@ -62,24 +62,6 @@ export const getSingleCollection = async (req, res) => {
 export const createContribution = async (req, res) => {
     const { name, email, phone, amount, contributionInformation, collectionId } = req.body.contributor;
 
-    // const collectionId= req.params.id;
-
-    // Parse contributionInformation || []; if needed
-    // let parsedParticipantInfo = contributionInformation || [];
-    // if (
-    //     typeof contributionInformation === "string"
-    // ) {
-    //     try {
-    //         parsedParticipantInfo = JSON.parse(contributionInformation);
-    //     } catch (error) {
-    //         console.error("Failed to parse contributionInformation || [];:", error);
-    //         return res.status(400).json({
-    //             success: false,
-    //             message: "Invalid contributionInformation || []; format",
-    //         });
-    //     }
-    // }
-
     // Validate required fields
     const requiredFields = ["name", "email", "amount"];
     const missingFields = requiredFields.filter((field) => !req.body[field]);
@@ -158,12 +140,6 @@ export const createContribution = async (req, res) => {
             contributor,
             contributorId: contributor.id,
         }
-        res.status(201).json({
-            success: true,
-            message: "Contributor added, payment initialized",
-            contributor,
-            contributorId: contributor.id,
-        });
     } catch (error) {
         console.error("Error in createContribution:", error);
         res.status(500).json({
