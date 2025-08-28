@@ -310,3 +310,78 @@ export const getSingleCollection = async (req, res) => {
         return res.status(500).json({ error: "Unexpected server error" });
     }
 };
+
+export const editCollection = async (req, res) => {
+    const { id } = req.params;
+    const {
+        title,
+        description,
+        deadline,
+        max_contributions,
+        contributions_fields,
+        price_tiers,
+        collectionType
+    } = req.body;
+
+    // Prepare update data
+    const updateData = {
+        title,
+        description,
+        deadline,
+        max_contributions: collectionType === 'flat' ? (max_contributions || null) : null,
+        contributions_fields: Array.isArray(contributions_fields) && contributions_fields.length > 0 ? contributions_fields : null,
+        price_tiers: collectionType === 'tiered' ? price_tiers : null,
+        updated_at: new Date().toISOString()
+    };
+
+
+
+    // Remove undefined/null fields for clean update
+    Object.keys(updateData).forEach(key => {
+        if (updateData[key] === undefined) delete updateData[key];
+    });
+
+    console.log(updateData, "<< This is the update data");
+
+
+    try {
+        const { data, error } = await supabase
+            .from("collections")
+            .update(updateData)
+            .eq("id", id)
+            .select()
+            .single();
+
+        if (error) {
+            return res.status(400).json({ error: error.message });
+        }
+
+        return res.status(200).json({ collection: data });
+    } catch (err) {
+        console.error("Error editing collection:", err);
+        return res.status(500).json({ error: "Unexpected server error" });
+    }
+};
+
+export const updateCollectionStatus = async (req, res) => {
+    const { id: collectionId } = req.params;
+    const { newStatus } = req.body;
+    console.log(collectionId, newStatus);
+
+    if (!collectionId || !newStatus) {
+        return res.status(400).json({ error: "Collection ID and new status are required." });
+    }
+
+    const { error } = await supabase
+        .from('collections')
+        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .eq('id', collectionId);
+
+    if (error) {
+        return res.status(400).json({ error: error.message });
+    }
+
+    return res.status(200).json({ message: "Collection status updated successfully." });
+};
+
+
