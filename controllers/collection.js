@@ -33,7 +33,7 @@ export const createCollection = async (req, res) => {
     // ------------------------
     // 2. Determine collection type
     // ------------------------
-    let collectionType = "flat"; // default
+    let collectionType = "fixed"; // default
     let parsedAmount = null;
 
     if (price_tiers && Array.isArray(price_tiers) && price_tiers.length > 0) {
@@ -59,9 +59,9 @@ export const createCollection = async (req, res) => {
         // For tiered collections, overall "amount" = 0
         parsedAmount = 0;
     } else {
-        // Flat collection
+        // fixed collection
         if (!amount) {
-            return res.status(400).json({ error: "Amount is required for flat collections" });
+            return res.status(400).json({ error: "Amount is required for fixed collections" });
         }
 
         parsedAmount = parseFloat(amount);
@@ -75,8 +75,8 @@ export const createCollection = async (req, res) => {
     // ------------------------
     let amountBreakdown = {};
 
-    if (collectionType === "flat" && !isNaN(parsedAmount)) {
-        // ----------- Flat collection fees -----------
+    if (collectionType === "fixed" && !isNaN(parsedAmount)) {
+        // ----------- fixed collection fees -----------
         let kolektoFee;
 
         if (parsedAmount < 1000) {
@@ -95,7 +95,7 @@ export const createCollection = async (req, res) => {
         const totalFees = kolektoFee + gatewayFee;
 
         amountBreakdown = {
-            type: "flat",
+            type: "fixed",
             amount: parsedAmount,
             fee_bearer: fee_bearer || "organizer",
             platformFee: kolektoFee,
@@ -253,7 +253,7 @@ export const getUserCollections = async (req, res) => {
             price_tiers: collection.type === "tiered"
                 ? collection.pricing_tiers || []
                 : [],
-            amountBreakdown: collection.type === "flat"
+            amountBreakdown: collection.type === "fixed"
                 ? collection.wallets?.fee_breakdown || {}
                 : null
         }));
@@ -299,7 +299,7 @@ export const getSingleCollection = async (req, res) => {
             price_tiers: data.type === "tiered"
                 ? data.pricing_tiers || []
                 : [],
-            amountBreakdown: data.type === "flat"
+            amountBreakdown: data.type === "fixed"
                 ? data.wallets?.fee_breakdown || {}
                 : null
         };
@@ -328,7 +328,7 @@ export const editCollection = async (req, res) => {
         title,
         description,
         deadline,
-        max_contributions: collectionType === 'flat' ? (max_contributions || null) : null,
+        max_contributions: collectionType === 'fixed' ? (max_contributions || null) : null,
         contributions_fields: Array.isArray(contributions_fields) && contributions_fields.length > 0 ? contributions_fields : null,
         price_tiers: collectionType === 'tiered' ? price_tiers : null,
         updated_at: new Date().toISOString()
