@@ -59,12 +59,103 @@ export const getSingleCollection = async (req, res) => {
 };
 
 // Create a new contribution (contributor)
+// export const createContribution = async (req, res) => {
+//     const { name, email, phone, amount, contributionInformation, collectionId } = req.body.contributor;
+
+//     // Validate required fields
+//     const requiredFields = ["name", "email", "amount"];
+//     const missingFields = requiredFields.filter((field) => !req.body[field]);
+//     if (missingFields.length > 0) {
+//         return res.status(400).json({
+//             success: false,
+//             message: `Please provide ${missingFields.join(", ")}`,
+//         });
+//     }
+
+//     // Start transaction (using Supabase's RPC for rollback, if available)
+//     const client = supabase; // Supabase JS client does not support multi-statement transactions directly
+//     try {
+//         // Check if collection exists
+//         const { data: collection, error: collectionError } = await client
+//             .from('collections')
+//             .select('*')
+//             .eq('id', collectionId)
+//             .single();
+
+//         if (collectionError || !collection) {
+//             return res.status(404).json({
+//                 success: false,
+//                 message: "Collection not found",
+//             });
+//         }
+
+//         // Check max participants if applicable
+//         if (
+//             collection.max_contributions &&
+//             collection.max_contributions > 0
+//         ) {
+//             const { count, error: countError } = await client
+//                 .from('contributions')
+//                 .select('id', { count: 'exact', head: true })
+//                 .eq('collection_id', collectionId)
+//                 .eq('status', 'paid');
+
+//             if (countError) {
+//                 throw new Error("Failed to count participants");
+//             }
+
+//             if (count >= collection.max_contributions) {
+//                 return res.status(400).json({
+//                     success: false,
+//                     message: "Maximum participants reached",
+//                 });
+//             }
+//         }
+
+//         // Generate unique code if needed
+//         let contributorUniqueCode = null;
+//         if (collection.code_prefix) {
+//             contributorUniqueCode = `${collection.code_prefix}_${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+//         }
+
+//         // Insert contributor (contribution)
+//         const { data: contributor, error: contributorError } = await client
+//             .from('contributions')
+//             .insert([{
+//                 collection_id: collectionId,
+//                 name,
+//                 email,
+//                 phone,
+//                 amount,
+//                 contributor_information: contributionInformation || [],
+//                 status: "pending",
+//             }])
+//             .select()
+//             .single();
+
+//         if (contributorError) {
+//             throw new Error(contributorError.message);
+//         }
+//         return {
+//             contributor,
+//             contributorId: contributor.id,
+//         }
+//     } catch (error) {
+//         console.error("Error in createContribution:", error);
+//         res.status(500).json({
+//             success: false,
+//             message: error.message || "Internal server error",
+//         });
+//     }
+// };
+
 export const createContribution = async (req, res) => {
-    const { name, email, phone, amount, contributionInformation, collectionId } = req.body.contributor;
+    const { contributor } = req.body;
+    const { name, email, phone, amount, contributionInformation, collectionId } = contributor || {};
 
     // Validate required fields
     const requiredFields = ["name", "email", "amount"];
-    const missingFields = requiredFields.filter((field) => !req.body[field]);
+    const missingFields = requiredFields.filter((field) => !contributor?.[field]);
     if (missingFields.length > 0) {
         return res.status(400).json({
             success: false,
@@ -72,14 +163,12 @@ export const createContribution = async (req, res) => {
         });
     }
 
-    // Start transaction (using Supabase's RPC for rollback, if available)
-    const client = supabase; // Supabase JS client does not support multi-statement transactions directly
     try {
         // Check if collection exists
-        const { data: collection, error: collectionError } = await client
-            .from('collections')
-            .select('*')
-            .eq('id', collectionId)
+        const { data: collection, error: collectionError } = await supabase
+            .from("collections")
+            .select("*")
+            .eq("id", collectionId)
             .single();
 
         if (collectionError || !collection) {
@@ -89,38 +178,32 @@ export const createContribution = async (req, res) => {
             });
         }
 
-        // Check max participants if applicable
-        if (
-            collection.max_participants &&
-            collection.max_participants > 0
-        ) {
-            const { count, error: countError } = await client
-                .from('contributions')
-                .select('id', { count: 'exact', head: true })
-                .eq('collection_id', collectionId)
-                .eq('status', 'paid');
+        // (Optional) Check max contributions at API level
+        if (collection.max_contributions && collection.max_contributions > 0) {
+            const { count, error: countError } = await supabase
+                .from("contributions")
+                .select("id", { count: "exact", head: true })
+                .eq("collection_id", collectionId)
+                .eq("status", "paid");
 
-            if (countError) {
-                throw new Error("Failed to count participants");
-            }
-
-            if (count >= collection.max_participants) {
+            if (countError) throw new Error("Failed to count participants");
+            if (count >= collection.max_contributions) {
                 return res.status(400).json({
                     success: false,
-                    message: "Maximum participants reached",
+                    message: "Maximum contributions reached",
                 });
             }
         }
 
-        // Generate unique code if needed
+        // Generate contributor code
         let contributorUniqueCode = null;
         if (collection.code_prefix) {
             contributorUniqueCode = `${collection.code_prefix}_${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
         }
 
-        // Insert contributor (contribution)
-        const { data: contributor, error: contributorError } = await client
-            .from('contributions')
+        // Insert contributor
+        const { data: contributorData, error: contributorError } = await supabase
+            .from("contributions")
             .insert([{
                 collection_id: collectionId,
                 name,
@@ -134,12 +217,20 @@ export const createContribution = async (req, res) => {
             .single();
 
         if (contributorError) {
-            throw new Error(contributorError.message);
+            if (contributorError.message.includes("Maximum contributions reached")) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Maximum contributions reached",
+                });
+            }
+            throw contributorError;
         }
+
         return {
-            contributor,
-            contributorId: contributor.id,
+            contributor: contributorData,
+            contributorId: contributorData.id,
         }
+
     } catch (error) {
         console.error("Error in createContribution:", error);
         res.status(500).json({
