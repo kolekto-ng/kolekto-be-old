@@ -74,7 +74,9 @@ export async function updateWalletStats(collectionId, amount) {
 
         if (collection.fee_bearer === "contributor") {
             // contributor already covered fees, so wallet gets full amount
-            netToAdd = Number(amount);
+            netToAdd = Number(amount) - fees;;
+            console.log(netToAdd, '<< net to add for contributor pays fees');
+
         } else {
             // organizer covers fees, deduct from wallet
             netToAdd = Number(amount) - fees;
@@ -82,8 +84,10 @@ export async function updateWalletStats(collectionId, amount) {
         }
     } else {
         // Tiered
+        console.log(wallet.fee_breakdown, '<< wallet tiers');
+
         const tierObj = wallet.fee_breakdown?.tiers?.find(
-            t => t.price === netToAdd
+            t => t.totalPayable === netToAdd
         );
 
         console.log(tierObj, '<< this is the tier object');
@@ -93,7 +97,9 @@ export async function updateWalletStats(collectionId, amount) {
 
         if (collection.fee_bearer === "contributor") {
             // Contributor paid: tierAmount + fees
-            netToAdd = Number(amount);;
+            netToAdd = Number(amount) - tierFees;
+            console.log(netToAdd, '<< net to add for contributor pays fees');
+
         } else {
             // Organizer pays: fees deducted from wallet
             netToAdd = Number(amount) - tierFees;
