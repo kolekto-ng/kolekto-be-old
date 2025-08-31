@@ -77,22 +77,11 @@ export const createCollection = async (req, res) => {
 
     if (collectionType === "fixed" && !isNaN(parsedAmount)) {
         // ----------- fixed collection fees -----------
-        let kolektoFee;
+        let kolektoFee = Math.min(parsedAmount * 0.005, 2000); // 0.5% capped at ₦2,000
+        let gatewayFee = Math.min(parsedAmount * 0.015, 2000); // 1.5% capped at ₦2,000
 
-        if (parsedAmount < 1000) {
-            kolektoFee = 30;
-        } else if (parsedAmount <= 5000) {
-            kolektoFee = 50;
-        } else if (parsedAmount <= 10000) {
-            kolektoFee = 100;
-        } else if (parsedAmount <= 20000) {
-            kolektoFee = 200;
-        } else {
-            kolektoFee = Math.min(parsedAmount * 0.01, 2000);
-        }
-
-        let gatewayFee = Math.min(parsedAmount * 0.015, 2000);
         const totalFees = kolektoFee + gatewayFee;
+
 
         amountBreakdown = {
             type: "fixed",
@@ -111,21 +100,12 @@ export const createCollection = async (req, res) => {
         amountBreakdown = {
             type: "tiered",
             tiers: price_tiers.map((tier) => {
-                let kolektoFee;
+                // Kolekto fee: 0.5% capped at ₦2,000
+                let kolektoFee = Math.min(tier.price * 0.005, 2000);
 
-                if (tier.price < 1000) {
-                    kolektoFee = 30;
-                } else if (tier.price <= 5000) {
-                    kolektoFee = 50;
-                } else if (tier.price <= 10000) {
-                    kolektoFee = 100;
-                } else if (tier.price <= 20000) {
-                    kolektoFee = 200;
-                } else {
-                    kolektoFee = Math.min(tier.price * 0.01, 2000);
-                }
-
+                // Gateway fee: 1.5% capped at ₦2,000
                 let gatewayFee = Math.min(tier.price * 0.015, 2000);
+
                 const totalFees = kolektoFee + gatewayFee;
 
                 return {
