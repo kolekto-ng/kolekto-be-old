@@ -42,54 +42,12 @@ function calculateFees(amount, feeBearer = "organizer") {
 }
 
 /**
- * Update collection stats after a successful payment
- */
-export async function updateCollectionStats(collectionId, amount) {
-    if (!collectionId || !amount || amount <= 0) return;
-
-    // Fetch the collection to determine type and fee structure
-    const { data: collection, error: collectionError } = await supabase
-        .from("collections")
-        .select("*")
-        .eq("id", collectionId)
-        .single();
-
-    if (collectionError || !collection) return;
-
-    let netToAdd = Number(amount);
-
-    // Calculate fees based on collection type
-    const feeCalculation = calculateFees(amount, collection.fee_bearer);
-
-    // If organizer pays fees, deduct them from the net amount
-    if (collection.fee_bearer === "organizer") {
-        netToAdd = Number(amount) - Number(feeCalculation.totalFees);
-        if (netToAdd < 0) netToAdd = 0;
-    }
-
-    // Calculate new values
-    const newTotalContributions = (collection.total_contributions || 0) + 1;
-    const newGrossPayment = Number(collection.gross_payment || 0) + Number(amount);
-    const newNetPayment = Number(collection.net_payment || 0) + netToAdd;
-    const newBalance = Number(collection.balance || 0) + netToAdd;
-
-    await supabase
-        .from("collections")
-        .update({
-            total_contributions: newTotalContributions,
-            gross_payment: newGrossPayment,
-            net_payment: newNetPayment,
-            balance: newBalance
-        })
-        .eq("id", collectionId);
-}
-
-/**
  * Safely update wallet stats after a successful deposit/payment.
  * Handles edge cases: duplicate payments, missing wallet, zero/negative amount.
  */
 export async function updateWalletStats(collectionId, amount) {
     if (!collectionId || !amount || amount <= 0) return;
+    console.log(collectionId, amount, '<< updating wallet stats...');
 
     // Fetch both wallet and collection data in parallel
     const [walletResult, collectionResult] = await Promise.all([
@@ -103,21 +61,52 @@ export async function updateWalletStats(collectionId, amount) {
     if (walletError || !wallet || collectionError || !collection) return;
 
     let netToAdd = Number(amount);
+    console.log(wallet.fee_breakdown.tiers, collection, '<< wallet and collection details');
+
 
     // Calculate fees based on the amount
     const feeCalculation = calculateFees(amount, collection.fee_bearer);
 
     // If organizer pays fees, deduct them from the net amount
-    if (collection.fee_bearer === "organizer") {
-        netToAdd = Number(amount) - Number(feeCalculation.totalFees);
-        if (netToAdd < 0) netToAdd = 0;
+    // If organizer pays fees, deduct them from the net amount
+    if (collection.type === "fixed") {
+        const fees = Number(wallet?.fee_breakdown?.totalFees || 0);
+
+        if (collection.fee_bearer === "contributor") {
+            // contributor already covered fees, so wallet gets full amount
+            netToAdd = Number(amount);
+        } else {
+            // organizer covers fees, deduct from wallet
+            netToAdd = Number(amount) - fees;
+            if (netToAdd < 0) netToAdd = 0;
+        }
+    } else {
+        // Tiered
+        const tierObj = wallet.fee_breakdown?.tiers?.find(
+            t => t.price === netToAdd
+        );
+
+        console.log(tierObj, '<< this is the tier object');
+
+
+        const tierFees = Number(tierObj?.totalFees || 0);
+
+        if (collection.fee_bearer === "contributor") {
+            // Contributor paid: tierAmount + fees
+            netToAdd = Number(amount);;
+        } else {
+            // Organizer pays: fees deducted from wallet
+            netToAdd = Number(amount) - tierFees;
+            if (netToAdd < 0) netToAdd = 0;
+        }
     }
 
-    // Calculate new values
+    // ✅ Correct use of grossToAdd and netToAdd
     const newGrossPayment = Number(wallet.gross_payment || 0) + Number(amount);
     const newNetPayment = Number(wallet.net_payment || 0) + netToAdd;
     const newAvailableBalance = Number(wallet.available_balance || 0) + netToAdd;
     const newLedgerBalance = Number(wallet.ledger_balance || 0) + netToAdd;
+
 
     // Update wallet
     await supabase
@@ -179,6 +168,7 @@ export const initializePayment = async (req, res) => {
         if (res.headersSent) return;
 
         const contributor = contributionResult?.contributor;
+        console.log(contributor, '<< this is the contributor');
 
         contributorId = contributor?.id;
 
@@ -191,12 +181,12 @@ export const initializePayment = async (req, res) => {
             `${PAYSTACK_BASE_URL}/transaction/initialize`,
             {
                 email,
-                amount: Math.round(amount * 100),
+                amount: Math.round(contributor.amount * 100),
                 callback_url: callback_url, // Your callback URL
                 metadata: {
                     fullName,
                     phoneNumber,
-                    amount,
+                    ampunt: contributor.amount,
                     contributorId,
                     collectionId,
                 },
@@ -370,6 +360,7 @@ export const verifyPayment = async (req, res) => {
 
             // --- Update collection stats here ---
             if (deposit.collection_id && deposit.amount > 0) {
+                console.log('updating wallet stats...', deposit.collection_id, deposit.amount);
 
                 await updateWalletStats(deposit.collection_id, deposit.amount);
             }

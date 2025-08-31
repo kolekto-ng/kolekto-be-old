@@ -48,7 +48,6 @@ export const getSingleCollection = async (req, res) => {
         return res.status(404).json({ error: error.message });
     }
 
-    console.log("Collection data:", data);
 
     return res.status(200).json({ data });
 };
@@ -146,7 +145,7 @@ export const getSingleCollection = async (req, res) => {
 
 export const createContribution = async (req, res) => {
     const { contributor } = req.body;
-    const { name, email, phone, amount, contributionInformation, collectionId } = contributor || {};
+    let { name, email, phone, amount, contributionInformation, collectionId } = contributor || {};
 
     // Validate required fields
     const requiredFields = ["name", "email", "amount"];
@@ -158,19 +157,123 @@ export const createContribution = async (req, res) => {
         });
     }
 
+
+
     try {
         // Check if collection exists
+        // ✅ Step 2: Fetch collection details
+
         const { data: collection, error: collectionError } = await supabase
             .from("collections")
             .select("*")
             .eq("id", collectionId)
             .single();
-
         if (collectionError || !collection) {
             return res.status(404).json({
                 success: false,
                 message: "Collection not found",
             });
+        }
+
+
+        const { type: collection_type, fee_bearer, price_tiers, amount: collectionAmount } = collection;
+        console.log(collection, '<< collection details');
+
+        let collectionType = collection_type || "fixed";
+        let parsedAmount = null;
+        let amountBreakdown = {};
+
+        // ✅ Step 3: Handle contribution depending on collection type
+        if (collectionType === "tiered") {
+            // pick first selected tier from contributor_information
+            const selectedTierName = contributionInformation?.[0]?.Tier;
+            if (!selectedTierName) {
+                return res.status(400).json({ error: "No tier selected" });
+            }
+
+            // find that tier in collection.price_tiers
+            const selectedTier = price_tiers.find(
+                (t) => t.name.toLowerCase() === selectedTierName.toLowerCase()
+            );
+
+            if (!selectedTier) {
+                return res.status(400).json({ error: `Tier "${selectedTierName}" not found in collection` });
+            }
+
+            const tierPrice = parseFloat(selectedTier.price);
+            if (isNaN(tierPrice) || tierPrice <= 100) {
+                return res.status(400).json({ error: `Invalid tier price for "${selectedTier.name}"` });
+            }
+
+            // Fee calculation
+            let kolektoFee;
+            if (tierPrice < 1000) kolektoFee = 30;
+            else if (tierPrice <= 5000) kolektoFee = 50;
+            else if (tierPrice <= 10000) kolektoFee = 100;
+            else if (tierPrice <= 20000) kolektoFee = 200;
+            else kolektoFee = Math.min(tierPrice * 0.01, 2000);
+
+            let gatewayFee = Math.min(tierPrice * 0.015, 2000);
+            const totalFees = kolektoFee + gatewayFee;
+
+            amountBreakdown = {
+                type: "tiered",
+                tier: {
+                    name: selectedTier.name,
+                    basePrice: tierPrice,
+                    fee_bearer: fee_bearer || "organizer",
+                    platformFee: kolektoFee,
+                    paymentGatewayFee: gatewayFee,
+                    totalFees,
+                    totalPayable:
+                        fee_bearer === "contributor"
+                            ? tierPrice + totalFees
+                            : tierPrice,
+                },
+            };
+
+            parsedAmount = amountBreakdown.tier.totalPayable;
+
+        } else {
+            // ✅ Fixed contribution
+
+
+            if (isNaN(collectionAmount) || collectionAmount <= 100) {
+                return res.status(400).json({ error: "Collection amount must be greater than ₦100" });
+            }
+
+            // Base amount is always the collection's set amount
+            parsedAmount = collectionAmount;
+
+            // Fee calculation
+            let kolektoFee;
+            if (parsedAmount < 1000) kolektoFee = 30;
+            else if (parsedAmount <= 5000) kolektoFee = 50;
+            else if (parsedAmount <= 10000) kolektoFee = 100;
+            else if (parsedAmount <= 20000) kolektoFee = 200;
+            else kolektoFee = Math.min(parsedAmount * 0.01, 2000);
+
+            let gatewayFee = Math.min(parsedAmount * 0.015, 2000);
+            const totalFees = kolektoFee + gatewayFee;
+
+            amountBreakdown = {
+                type: "fixed",
+                baseAmount: parsedAmount,            // <- always collection’s fixed amount
+                fee_bearer: fee_bearer || "organizer",
+                platformFee: kolektoFee,
+                paymentGatewayFee: gatewayFee,
+                totalFees,
+                totalPayable:
+                    fee_bearer === "contributor"
+                        ? parsedAmount + totalFees
+                        : parsedAmount,
+            };
+
+            // ✅ final amount contributor should pay
+            parsedAmount = amountBreakdown.totalPayable;
+
+            console.log({ parsedAmount, kolektoFee, gatewayFee, totalFees }, "<< breakdown");
+
         }
 
         // (Optional) Check max contributions at API level
@@ -190,12 +293,6 @@ export const createContribution = async (req, res) => {
             }
         }
 
-        // Generate contributor code
-        let contributorUniqueCode = null;
-        if (collection.code_prefix) {
-            contributorUniqueCode = `${collection.code_prefix}_${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
-        }
-
         // Insert contributor
         const { data: contributorData, error: contributorError } = await supabase
             .from("contributions")
@@ -204,7 +301,7 @@ export const createContribution = async (req, res) => {
                 name,
                 email,
                 phone,
-                amount,
+                amount: parsedAmount,
                 contributor_information: contributionInformation || [],
                 status: "pending",
             }])
