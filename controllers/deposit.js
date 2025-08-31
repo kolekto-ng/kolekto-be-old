@@ -515,6 +515,7 @@ export const handleWebhook = async (req, res) => {
     // Only handle successful charges
     if (event.event === "charge.success") {
         const reference = event.data.reference;
+        console.log(reference, '<< webhook reference');
 
         // Fetch payment by reference
         const { data: deposit, error } = await supabase

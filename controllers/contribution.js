@@ -211,18 +211,12 @@ export const createContribution = async (req, res) => {
             }
 
             // Fee calculation
-            let kolektoFee;
-            if (tierPrice < 1000) kolektoFee = 30;
-            else if (tierPrice <= 5000) kolektoFee = 50;
-            else if (tierPrice <= 10000) kolektoFee = 100;
-            else if (tierPrice <= 20000) kolektoFee = 200;
-            else kolektoFee = Math.min(tierPrice * 0.01, 2000);
-
-            let gatewayFee = Math.min(tierPrice * 0.015, 2000);
+            let kolektoFee = Math.min(tierPrice * 0.005, 2000); // 0.5% capped ₦2,000
+            let gatewayFee = Math.min(tierPrice * 0.015, 2000); // 1.5% capped ₦2,000
             const totalFees = kolektoFee + gatewayFee;
 
             amountBreakdown = {
-                type: "tiered",
+                type: "tiered", // keep "tiered" if frontend depends on it
                 tier: {
                     name: selectedTier.name,
                     basePrice: tierPrice,
@@ -242,7 +236,6 @@ export const createContribution = async (req, res) => {
         } else {
             // ✅ Fixed contribution
 
-
             if (isNaN(collectionAmount) || collectionAmount <= 100) {
                 return res.status(400).json({ error: "Collection amount must be greater than ₦100" });
             }
@@ -251,14 +244,8 @@ export const createContribution = async (req, res) => {
             parsedAmount = collectionAmount;
 
             // Fee calculation
-            let kolektoFee;
-            if (parsedAmount < 1000) kolektoFee = 30;
-            else if (parsedAmount <= 5000) kolektoFee = 50;
-            else if (parsedAmount <= 10000) kolektoFee = 100;
-            else if (parsedAmount <= 20000) kolektoFee = 200;
-            else kolektoFee = Math.min(parsedAmount * 0.01, 2000);
-
-            let gatewayFee = Math.min(parsedAmount * 0.015, 2000);
+            let kolektoFee = Math.min(parsedAmount * 0.005, 2000); // 0.5% capped ₦2,000
+            let gatewayFee = Math.min(parsedAmount * 0.015, 2000); // 1.5% capped ₦2,000
             const totalFees = kolektoFee + gatewayFee;
 
             amountBreakdown = {
@@ -278,8 +265,8 @@ export const createContribution = async (req, res) => {
             parsedAmount = amountBreakdown.totalPayable;
 
             console.log({ parsedAmount, kolektoFee, gatewayFee, totalFees }, "<< breakdown");
-
         }
+
 
         // (Optional) Check max contributions at API level
         if (collection.max_contributions && collection.max_contributions > 0) {
