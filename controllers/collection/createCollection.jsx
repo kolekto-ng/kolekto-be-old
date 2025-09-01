@@ -33,7 +33,7 @@ export const createCollection = async (req, res) => {
     // ------------------------
     // 2. Determine collection type
     // ------------------------
-    let collectionType = "fixed"; // default
+    let collectionType = "flat"; // default
     let parsedAmount = null;
 
     if (price_tiers && Array.isArray(price_tiers) && price_tiers.length > 0) {
@@ -59,9 +59,9 @@ export const createCollection = async (req, res) => {
         // For tiered collections, overall "amount" = 0
         parsedAmount = 0;
     } else {
-        // fixed collection
+        // Flat collection
         if (!amount) {
-            return res.status(400).json({ error: "Amount is required for fixed collections" });
+            return res.status(400).json({ error: "Amount is required for flat collections" });
         }
 
         parsedAmount = parseFloat(amount);
@@ -75,16 +75,27 @@ export const createCollection = async (req, res) => {
     // ------------------------
     let amountBreakdown = {};
 
-    if (collectionType === "fixed" && !isNaN(parsedAmount)) {
-        // ----------- fixed collection fees -----------
-        let kolektoFee = Math.min(parsedAmount * 0.005, 2000); // 0.5% capped at ₦2,000
-        let gatewayFee = Math.min(parsedAmount * 0.015, 2000); // 1.5% capped at ₦2,000
+    if (collectionType === "flat" && !isNaN(parsedAmount)) {
+        // ----------- Flat collection fees -----------
+        let kolektoFee;
 
+        if (parsedAmount < 1000) {
+            kolektoFee = 30;
+        } else if (parsedAmount <= 5000) {
+            kolektoFee = 50;
+        } else if (parsedAmount <= 10000) {
+            kolektoFee = 100;
+        } else if (parsedAmount <= 20000) {
+            kolektoFee = 200;
+        } else {
+            kolektoFee = Math.min(parsedAmount * 0.01, 2000);
+        }
+
+        let gatewayFee = Math.min(parsedAmount * 0.015, 2000);
         const totalFees = kolektoFee + gatewayFee;
 
-
         amountBreakdown = {
-            type: "fixed",
+            type: "flat",
             amount: parsedAmount,
             fee_bearer: fee_bearer || "organizer",
             platformFee: kolektoFee,
@@ -100,12 +111,21 @@ export const createCollection = async (req, res) => {
         amountBreakdown = {
             type: "tiered",
             tiers: price_tiers.map((tier) => {
-                // Kolekto fee: 0.5% capped at ₦2,000
-                let kolektoFee = Math.min(tier.price * 0.005, 2000);
+                let kolektoFee;
 
-                // Gateway fee: 1.5% capped at ₦2,000
+                if (tier.price < 1000) {
+                    kolektoFee = 30;
+                } else if (tier.price <= 5000) {
+                    kolektoFee = 50;
+                } else if (tier.price <= 10000) {
+                    kolektoFee = 100;
+                } else if (tier.price <= 20000) {
+                    kolektoFee = 200;
+                } else {
+                    kolektoFee = Math.min(tier.price * 0.01, 2000);
+                }
+
                 let gatewayFee = Math.min(tier.price * 0.015, 2000);
-
                 const totalFees = kolektoFee + gatewayFee;
 
                 return {
@@ -200,168 +220,3 @@ export const createCollection = async (req, res) => {
             .json({ error: "Unexpected server error: " + error.message });
     }
 };
-
-export const getUserCollections = async (req, res) => {
-    const user_id = req.user.id;
-
-    try {
-        const { data, error } = await supabase
-            .from('collections')
-            .select(`
-                *,
-                wallets (
-                    id,
-                    available_balance,
-                    ledger_balance,
-                    gross_payment,
-                    net_payment,
-                    withdrawn,
-                    fee_breakdown,
-                    currency,
-                    currency_symbol
-                )
-            `)
-            .eq('user_id', user_id);
-
-        if (error) {
-            return res.status(500).json({ error: error.message });
-        }
-
-        // Format response
-        const formatted = data.map(collection => ({
-            ...collection,
-            price_tiers: collection.type === "tiered"
-                ? collection.pricing_tiers || []
-                : [],
-            amountBreakdown: collection.type === "fixed"
-                ? collection.wallets?.fee_breakdown || {}
-                : null
-        }));
-
-        return res.status(200).json({ ...formatted, data });
-    } catch (err) {
-        console.error("Error fetching user collections:", err);
-        return res.status(500).json({ error: "Unexpected server error" });
-    }
-};
-
-export const getSingleCollection = async (req, res) => {
-    const { id } = req.params;
-    const user_id = req.user.id;
-
-    try {
-        const { data, error } = await supabase
-            .from('collections')
-            .select(`
-                *,
-                wallets (
-                    id,
-                    available_balance,
-                    ledger_balance,
-                    gross_payment,
-                    net_payment,
-                    withdrawn,
-                    fee_breakdown,
-                    currency,
-                    currency_symbol
-                )
-            `)
-            .eq('id', id)
-            .eq('user_id', user_id)
-            .single();
-
-        if (error) {
-            return res.status(404).json({ error: error.message });
-        }
-
-        const collection = {
-            ...data,
-            price_tiers: data.type === "tiered"
-                ? data.pricing_tiers || []
-                : [],
-            amountBreakdown: data.type === "fixed"
-                ? data.wallets?.fee_breakdown || {}
-                : null
-        };
-
-        return res.status(200).json({ collection });
-    } catch (err) {
-        console.error("Error fetching collection:", err);
-        return res.status(500).json({ error: "Unexpected server error" });
-    }
-};
-
-export const editCollection = async (req, res) => {
-    const { id } = req.params;
-    const {
-        title,
-        description,
-        deadline,
-        max_contributions,
-        contributions_fields,
-        price_tiers,
-        collectionType
-    } = req.body;
-
-    // Prepare update data
-    const updateData = {
-        title,
-        description,
-        deadline,
-        max_contributions: collectionType === 'fixed' ? (max_contributions || null) : null,
-        contributions_fields: Array.isArray(contributions_fields) && contributions_fields.length > 0 ? contributions_fields : null,
-        price_tiers: collectionType === 'tiered' ? price_tiers : null,
-        updated_at: new Date().toISOString()
-    };
-
-
-
-    // Remove undefined/null fields for clean update
-    Object.keys(updateData).forEach(key => {
-        if (updateData[key] === undefined) delete updateData[key];
-    });
-
-    console.log(updateData, "<< This is the update data");
-
-
-    try {
-        const { data, error } = await supabase
-            .from("collections")
-            .update(updateData)
-            .eq("id", id)
-            .select()
-            .single();
-
-        if (error) {
-            return res.status(400).json({ error: error.message });
-        }
-
-        return res.status(200).json({ collection: data });
-    } catch (err) {
-        console.error("Error editing collection:", err);
-        return res.status(500).json({ error: "Unexpected server error" });
-    }
-};
-
-export const updateCollectionStatus = async (req, res) => {
-    const { id: collectionId } = req.params;
-    const { newStatus } = req.body;
-    console.log(collectionId, newStatus);
-
-    if (!collectionId || !newStatus) {
-        return res.status(400).json({ error: "Collection ID and new status are required." });
-    }
-
-    const { error } = await supabase
-        .from('collections')
-        .update({ status: newStatus, updated_at: new Date().toISOString() })
-        .eq('id', collectionId);
-
-    if (error) {
-        return res.status(400).json({ error: error.message });
-    }
-
-    return res.status(200).json({ message: "Collection status updated successfully." });
-};
-
-
