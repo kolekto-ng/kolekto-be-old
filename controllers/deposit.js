@@ -103,8 +103,9 @@ export async function updateWalletStats(collectionId, amount) {
     }
 
     if (collection.type === "fundraising") {
-        const fees = 0.025
-        netToAdd = Number(amount) - (amount * fees);
+        const fees = 1.025
+        netToAdd = (amount / fees);
+        netToAdd = parseFloat(netToAdd.toFixed(2));
         console.log(netToAdd, '<< net to add for contributor pays fees');
         if (netToAdd < 0) netToAdd = 0;
     }
