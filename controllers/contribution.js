@@ -142,7 +142,7 @@ export const createContribution = async (req, res) => {
 
             parsedAmount = amountBreakdown.tier.totalPayable;
 
-        } else {
+        } else if (collectionType === "fixed") {
             // ✅ Fixed contribution
 
             if (isNaN(collectionAmount) || collectionAmount <= 100) {
@@ -195,7 +195,10 @@ export const createContribution = async (req, res) => {
             }
         }
         if (collectionType === 'fundraising') {
-            parsedAmount = Math.max(parseFloat(amount), 100); // minimum ₦100
+            console.log('fundraising fee calculation', amount);
+
+            parsedAmount = parseFloat(amount + (amount * 0.025)); // minimum ₦100
+
         }
 
         // Insert contributor
