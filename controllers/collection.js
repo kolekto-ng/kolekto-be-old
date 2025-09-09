@@ -32,6 +32,7 @@ export const createCollection = async (req, res) => {
     if (collection_type === "fundraising" && (!target_amount || isNaN(parseFloat(target_amount)) || parseFloat(target_amount) <= 0)) {
         return res.status(400).json({ error: "Target amount must be a positive number for fundraising collections" });
     }
+    let amountBreakdown = {};
 
     if (collection_type === "fundraising") {
         if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
@@ -107,7 +108,6 @@ export const createCollection = async (req, res) => {
     // ------------------------
     // 3. Fee Breakdown
     // ------------------------
-    let amountBreakdown = {};
 
     if (collectionType === "fixed" && !isNaN(parsedAmount)) {
         // ----------- fixed collection fees -----------
