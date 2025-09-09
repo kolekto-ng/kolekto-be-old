@@ -39,6 +39,15 @@ export const createCollection = async (req, res) => {
         }
         collectionType = "fundraising"; // fundraising uses fixed amount per contribution
         fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
+        amountBreakdown = {
+            type: "fundraising",
+            amount: parsedAmount,
+            fee_bearer: "contributor",
+            platformFee: 0.01,
+            paymentGatewayFee: 0.015,
+            totalFees: 0.025,
+        };
+
     }
 
 
@@ -148,6 +157,23 @@ export const createCollection = async (req, res) => {
                 };
             }),
         };
+    }
+
+    if (collection_type === "fundraising") {
+        if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
+            return res.status(400).json({ error: "Amount must be greater than ₦100 for fundraising collections" });
+        }
+        collectionType = "fundraising"; // fundraising uses fixed amount per contribution
+        fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
+        amountBreakdown = {
+            type: "fundraising",
+            amount: parsedAmount,
+            fee_bearer: "contributor",
+            platformFee: 0.01,
+            paymentGatewayFee: 0.015,
+            totalFees: 0.025,
+        };
+
     }
 
     try {
