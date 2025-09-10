@@ -156,7 +156,7 @@ const paystackHeaders = {
 
 // Initialize a payment (get payment link)
 export const initializePayment = async (req, res) => {
-    const { fullName, email, phoneNumber, amount, collectionId, callback_url } = req.body;
+    let { fullName, email, phoneNumber, collectionType, amount, collectionId, callback_url } = req.body;
 
     if (!email || !amount || !fullName || !collectionId) {
         return res.status(400).json({ error: "Missing required fields" });
@@ -209,6 +209,10 @@ export const initializePayment = async (req, res) => {
             .single();
 
 
+        if (collectionType === 'fundraising') {
+            amount = contributor.amount; // use the original amount for fundraising
+        }
+
 
         const { data: payment, error: depositsError } = await supabase
             .from("deposits")
@@ -216,7 +220,7 @@ export const initializePayment = async (req, res) => {
                 full_name: fullName,
                 email,
                 phone_number: phoneNumber,
-                amount: contributor.amount,
+                amount: amount,
                 status: "pending",
                 payment_reference: paystackData.reference,
                 access_code: paystackData.access_code, // Save access_code
