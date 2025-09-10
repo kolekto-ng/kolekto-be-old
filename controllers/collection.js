@@ -2,10 +2,12 @@ import { supabase } from '../utils/client.js';
 
 // controllers/collections.js
 export const createCollection = async (req, res) => {
-    const {
+    let {
         title,
         description,
         amount,
+        fundraising_target_amount: target_amount,
+        collection_type,
         deadline,
         max_contributions,
         contributions_fields,
@@ -20,21 +22,54 @@ export const createCollection = async (req, res) => {
     // ------------------------
     // 1. Basic validations
     // ------------------------
+    let collectionType = "fixed"; // default
+    let parsedAmount = null;
+
+    if (collection_type && !["fixed", "tiered", "fundraising"].includes(collection_type)) {
+        return res.status(400).json({ error: "Collection type must be either 'fixed' or 'tiered'" });
+    }
+
+    if (collection_type === "fundraising" && (!target_amount || isNaN(parseFloat(target_amount)) || parseFloat(target_amount) <= 0)) {
+        return res.status(400).json({ error: "Target amount must be a positive number for fundraising collections" });
+    }
+    let amountBreakdown = {};
+
+    if (collection_type === "fundraising") {
+        if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
+            return res.status(400).json({ error: "Amount must be greater than ₦100 for fundraising collections" });
+        }
+        collectionType = "fundraising"; // fundraising uses fixed amount per contribution
+        fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
+        amountBreakdown = {
+            type: "fundraising",
+            amount: parsedAmount,
+            fee_bearer: "contributor",
+            platformFee: 0.01,
+            paymentGatewayFee: 0.015,
+            totalFees: 0.025,
+        };
+
+    }
+
+
     if (!title) {
         return res.status(400).json({ error: "Title is required" });
     }
 
-    if (!deadline || isNaN(Date.parse(deadline)) || new Date(deadline) <= new Date()) {
-        return res.status(400).json({ error: "Deadline must be a valid future date" });
+    if (collection_type !== "fundraising") {
+        if (!deadline || isNaN(Date.parse(deadline)) || new Date(deadline) <= new Date()) {
+            return res.status(400).json({ error: "Deadline must be a valid future date" });
+        }
     }
+
+
 
     const user_id = req.user.id;
 
     // ------------------------
     // 2. Determine collection type
     // ------------------------
-    let collectionType = "fixed"; // default
-    let parsedAmount = null;
+
 
     if (price_tiers && Array.isArray(price_tiers) && price_tiers.length > 0) {
         collectionType = "tiered";
@@ -73,7 +108,6 @@ export const createCollection = async (req, res) => {
     // ------------------------
     // 3. Fee Breakdown
     // ------------------------
-    let amountBreakdown = {};
 
     if (collectionType === "fixed" && !isNaN(parsedAmount)) {
         // ----------- fixed collection fees -----------
@@ -125,6 +159,23 @@ export const createCollection = async (req, res) => {
         };
     }
 
+    if (collection_type === "fundraising") {
+        if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
+            return res.status(400).json({ error: "Amount must be greater than ₦100 for fundraising collections" });
+        }
+        collectionType = "fundraising"; // fundraising uses fixed amount per contribution
+        fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
+        amountBreakdown = {
+            type: "fundraising",
+            amount: parsedAmount,
+            fee_bearer: "contributor",
+            platformFee: 0.01,
+            paymentGatewayFee: 0.015,
+            totalFees: 0.025,
+        };
+
+    }
+
     try {
         // ------------------------
         // 4. Insert collection
@@ -156,7 +207,9 @@ export const createCollection = async (req, res) => {
                                 quantity: tier.quantity ?? null, // null = unlimited
                             }))
                             : [],
+                    target_amount: collectionType === "fundraising" ? parseFloat(target_amount) : null,
                 },
+
             ])
             .select()
             .single();

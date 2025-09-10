@@ -63,11 +63,6 @@ export async function updateWalletStats(collectionId, amount) {
     let netToAdd = Number(amount);
     console.log(wallet.fee_breakdown.tiers, collection, '<< wallet and collection details');
 
-
-    // Calculate fees based on the amount
-    const feeCalculation = calculateFees(amount, collection.fee_bearer);
-
-    // If organizer pays fees, deduct them from the net amount
     // If organizer pays fees, deduct them from the net amount
     if (collection.type === "fixed") {
         const fees = Number(wallet?.fee_breakdown?.totalFees || 0);
@@ -82,7 +77,7 @@ export async function updateWalletStats(collectionId, amount) {
             netToAdd = Number(amount) - fees;
             if (netToAdd < 0) netToAdd = 0;
         }
-    } else {
+    } else if (collection.type === "tiered") {
         // Tiered
         console.log(wallet.fee_breakdown, '<< wallet tiers');
 
@@ -105,6 +100,14 @@ export async function updateWalletStats(collectionId, amount) {
             netToAdd = Number(amount) - tierFees;
             if (netToAdd < 0) netToAdd = 0;
         }
+    }
+
+    if (collection.type === "fundraising") {
+        const fees = 1.025
+        netToAdd = (amount / fees);
+        netToAdd = parseFloat(netToAdd.toFixed(2));
+        console.log(netToAdd, '<< net to add for contributor pays fees');
+        if (netToAdd < 0) netToAdd = 0;
     }
 
     // ✅ Correct use of grossToAdd and netToAdd
@@ -153,7 +156,7 @@ const paystackHeaders = {
 
 // Initialize a payment (get payment link)
 export const initializePayment = async (req, res) => {
-    const { fullName, email, phoneNumber, amount, collectionId, callback_url } = req.body;
+    let { fullName, email, phoneNumber, collectionType, amount, collectionId, callback_url } = req.body;
 
     if (!email || !amount || !fullName || !collectionId) {
         return res.status(400).json({ error: "Missing required fields" });
@@ -164,14 +167,10 @@ export const initializePayment = async (req, res) => {
 
     try {
         // 1. Create a contribution record
-        req.body.name = fullName;
-        req.body.phone = phoneNumber;
-        req.body.amount = amount;
-        req.params.collectionId = collectionId;
-
         const contributionResult = await createContribution(req, res);
 
         if (res.headersSent) return;
+        console.log(amount, '<< amount in initializePayment', contributionResult);
 
         const contributor = contributionResult?.contributor;
         console.log(contributor, '<< this is the contributor');
@@ -215,7 +214,7 @@ export const initializePayment = async (req, res) => {
                 full_name: fullName,
                 email,
                 phone_number: phoneNumber,
-                amount,
+                amount: contributor.amount,
                 status: "pending",
                 payment_reference: paystackData.reference,
                 access_code: paystackData.access_code, // Save access_code
@@ -367,6 +366,7 @@ export const verifyPayment = async (req, res) => {
             // --- Update collection stats here ---
             if (deposit.collection_id && deposit.amount > 0) {
                 console.log('updating wallet stats...', deposit.collection_id, deposit.amount);
+                console.log(deposit.amount, 'deposit amo');
 
                 await updateWalletStats(deposit.collection_id, deposit.amount);
             }
