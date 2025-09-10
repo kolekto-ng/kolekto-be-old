@@ -77,7 +77,7 @@ export async function updateWalletStats(collectionId, amount) {
             netToAdd = Number(amount) - fees;
             if (netToAdd < 0) netToAdd = 0;
         }
-    } else if (collection.type === "tired") {
+    } else if (collection.type === "tiered") {
         // Tiered
         console.log(wallet.fee_breakdown, '<< wallet tiers');
 
@@ -208,19 +208,13 @@ export const initializePayment = async (req, res) => {
             .eq("collection_id", collectionId)
             .single();
 
-
-        if (collectionType === 'fundraising') {
-            amount = contributor.amount; // use the original amount for fundraising
-        }
-
-
         const { data: payment, error: depositsError } = await supabase
             .from("deposits")
             .insert([{
                 full_name: fullName,
                 email,
                 phone_number: phoneNumber,
-                amount: amount,
+                amount: contributor.amount,
                 status: "pending",
                 payment_reference: paystackData.reference,
                 access_code: paystackData.access_code, // Save access_code
