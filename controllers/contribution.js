@@ -44,6 +44,11 @@ export const getSingleCollection = async (req, res) => {
         .eq('id', collectionId)
         .single();
 
+    console.log(data, 'collectiopn data');
+    if (data?.max_contributions == data?.total_contributions) {
+        res.status(200).json({ message: "collection is full", data })
+    }
+
     if (error) {
         return res.status(404).json({ error: error.message });
     }
