@@ -1,5 +1,5 @@
 import { supabase } from '../utils/client.js';
-
+import fetch from "node-fetch";
 // Sign In
 export const signIn = async (req, res) => {
     const { email, password } = req.body;
@@ -64,9 +64,35 @@ export const signIn = async (req, res) => {
 
 // Sign Up
 export const signUp = async (req, res) => {
+
     const { email, password, firstName, lastName, phoneNumber } = req.body;
+
     if (!email || !password || !firstName || !lastName || !phoneNumber) {
         return res.status(400).json({ error: "Email, password, first name and last name are required." });
+    }
+
+    if (type === "v3") {
+        const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V3_SECRET}&response=${token}`;
+        const googleRes = await fetch(verifyUrl, { method: "POST" });
+        const result = await googleRes.json();
+
+        if (!result.success || result.score < 0.5) {
+            // 👇 ask frontend to fallback
+            return res.json({ requireV2: true });
+        }
+
+        // ✅ v3 passed
+        // return res.json({ success: true });
+    }
+
+    if (type === "v2") {
+        const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V2_SECRET}&response=${token}`;
+        const googleRes = await fetch(verifyUrl, { method: "POST" });
+        const result = await googleRes.json();
+
+        if (!result.success) {
+            return res.status(400).json({ error: "Failed v2 captcha" });
+        }
     }
 
     const { data, error } = await supabase.auth.signUp({

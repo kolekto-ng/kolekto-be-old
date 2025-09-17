@@ -19,6 +19,7 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.14.1",
+    "node-fetch": "^3.3.2",
     "multer": "^2.0.2",
     "nodemon": "^3.1.10",
     "sib-api-v3-sdk": "^8.5.0",
