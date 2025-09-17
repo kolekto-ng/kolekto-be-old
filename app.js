@@ -50,6 +50,8 @@ app.use("/api/withdrawals", withdrawalRouter);
 app.use("/api/settings/profile", profileRouter);
 
 const port = process.env.PORT || 5000;
+
+app.set('trust proxy', true);
 app.listen(port, () => {
     console.log(`Server Running on port ${port}`);
 });
