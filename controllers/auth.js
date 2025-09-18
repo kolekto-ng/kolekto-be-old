@@ -65,7 +65,7 @@ export const signIn = async (req, res) => {
 // Sign Up
 export const signUp = async (req, res) => {
 
-    const { email, password, firstName, lastName, phoneNumber } = req.body;
+    const { email, password, firstName, lastName, phoneNumber, recaptcherToken: token, recatcherType: type } = req.body;
 
     if (!email || !password || !firstName || !lastName || !phoneNumber) {
         return res.status(400).json({ error: "Email, password, first name and last name are required." });
@@ -78,6 +78,8 @@ export const signUp = async (req, res) => {
 
         if (!result.success || result.score < 0.5) {
             // 👇 ask frontend to fallback
+            console.log(result, 'recaptcha result');
+
             return res.json({ requireV2: true });
         }
 
