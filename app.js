@@ -8,6 +8,7 @@ import paymentRouter from "./routes/payment.js";
 import contributorRouter from "./routes/contribution.js";
 import withdrawalRouter from "./routes/withdrawal.js";
 import profileRouter from "./routes/settings/profile.js";
+import kycRouter from "./routes/settings/kyc.js";
 import helmet from "helmet";
 dotenv.config();
 
@@ -48,6 +49,7 @@ app.use("/api", collectorRouter);
 app.use("/api/payments", paymentRouter);
 app.use("/api/withdrawals", withdrawalRouter);
 app.use("/api/settings/profile", profileRouter);
+app.use("/api/settings/kyc", kycRouter);
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => {
