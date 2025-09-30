@@ -52,6 +52,8 @@ app.use("/api/settings/profile", profileRouter);
 app.use("/api/settings/kyc", kycRouter);
 
 const port = process.env.PORT || 5000;
+
+app.set('trust proxy', true);
 app.listen(port, () => {
     console.log(`Server Running on port ${port}`);
 });

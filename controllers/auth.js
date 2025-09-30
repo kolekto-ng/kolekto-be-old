@@ -1,5 +1,6 @@
 import { supabase } from '../utils/client.js';
 import fetch from "node-fetch";
+import { createAssessmentV3 } from '../utils/recaptcha.js';
 // Sign In
 export const signIn = async (req, res) => {
     const { email, password } = req.body;
@@ -71,30 +72,39 @@ export const signUp = async (req, res) => {
         return res.status(400).json({ error: "Email, password, first name and last name are required." });
     }
 
-    if (type === "v3") {
-        const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V3_SECRET}&response=${token}`;
-        const googleRes = await fetch(verifyUrl, { method: "POST" });
-        const result = await googleRes.json();
+    try {
+        let result;
 
-        if (!result.success || result.score < 0.5) {
-            // 👇 ask frontend to fallback
-            console.log(result, 'recaptcha result');
+        if (type === "v3") {
+            result = await verifyRecaptcha({
+                token,
+                siteKey: process.env.RECAPTCHA_V3_SECRET,
+                expectedAction: "signup", // must match your frontend action
+            });
 
-            return res.json({ requireV2: true });
+            if (!result.success || result.score < 0.5) {
+                // fallback to v2
+
+                return res.json({ requireV2: true });
+            }
+
         }
 
-        // ✅ v3 passed
-        // return res.json({ success: true });
-    }
+        if (type === "v2") {
+            result = await verifyRecaptcha({
+                token,
+                siteKey: process.env.RECAPTCHA_V2_SECRET,
+            });
 
-    if (type === "v2") {
-        const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V2_SECRET}&response=${token}`;
-        const googleRes = await fetch(verifyUrl, { method: "POST" });
-        const result = await googleRes.json();
+            if (!result.success) {
+                return res.status(400).json({ error: "Failed v2 verification" });
+            }
 
-        if (!result.success) {
-            return res.status(400).json({ error: "Failed v2 captcha" });
         }
+
+    } catch (err) {
+        console.error("reCAPTCHA verification failed:", err);
+        res.status(500).json({ error: "Verification failed" });
     }
 
     const { data, error } = await supabase.auth.signUp({
