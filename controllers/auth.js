@@ -1,6 +1,6 @@
 import { supabase } from '../utils/client.js';
 import fetch from "node-fetch";
-import { createAssessmentV3 } from '../utils/recaptcha.js';
+import { verifyRecaptcha } from '../utils/recaptcha.js';
 // Sign In
 export const signIn = async (req, res) => {
     const { email, password } = req.body;
@@ -73,37 +73,31 @@ export const signUp = async (req, res) => {
     }
 
     try {
-        let result;
-
         if (type === "v3") {
-            result = await verifyRecaptcha({
-                token,
-                siteKey: process.env.RECAPTCHA_V3_SECRET,
-                expectedAction: "signup", // must match your frontend action
-            });
+            const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V3_SECRET}&response=${token}`;
+            const response = await fetch(verifyUrl, { method: "POST" });
+            const data = await response.json();
 
-            if (!result.success || result.score < 0.5) {
-                // fallback to v2
-
-                return res.json({ requireV2: true });
+            if (!data.success || data.score < 0.5) {
+                return res.json({ requireV2: true }); // fallback
             }
 
         }
 
         if (type === "v2") {
-            result = await verifyRecaptcha({
-                token,
-                siteKey: process.env.RECAPTCHA_V2_SECRET,
-            });
+            const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V2_SECRET}&response=${token}`;
+            const response = await fetch(verifyUrl, { method: "POST" });
+            const data = await response.json();
 
-            if (!result.success) {
+            if (!data.success) {
                 return res.status(400).json({ error: "Failed v2 verification" });
             }
 
         }
 
+        res.status(400).json({ error: "Invalid request type" });
     } catch (err) {
-        console.error("reCAPTCHA verification failed:", err);
+        console.error(err);
         res.status(500).json({ error: "Verification failed" });
     }
 
