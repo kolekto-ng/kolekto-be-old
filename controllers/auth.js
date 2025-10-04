@@ -14,7 +14,7 @@ export const signIn = async (req, res) => {
 
         if (error) {
             console.log(error, "error");
-            return res.status(400).json({ error: error.message });
+            return res.status(400).json({ message: error.message });
         }
 
         // Fetch user profile data
@@ -59,7 +59,7 @@ export const signIn = async (req, res) => {
         });
     } catch (err) {
         console.error('Sign in error:', err);
-        return res.status(500).json({ error: "Internal server error during sign in" });
+        return res.status(500).json({ message: "Internal server error during sign in" });
     }
 };
 
@@ -74,10 +74,12 @@ export const signUp = async (req, res) => {
 
     try {
         if (type === "v3") {
+            console.log(process.env.RECAPTCHA_V3_SECRET, token);
+
             const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V3_SECRET}&response=${token}`;
             const response = await fetch(verifyUrl, { method: "POST" });
             const data = await response.json();
-
+            console.log(data, "recapcha data");
             if (!data.success || data.score < 0.5) {
                 return res.json({ requireV2: true }); // fallback
             }
@@ -88,17 +90,24 @@ export const signUp = async (req, res) => {
             const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V2_SECRET}&response=${token}`;
             const response = await fetch(verifyUrl, { method: "POST" });
             const data = await response.json();
-
+            console.log(data, 'v2 data');
             if (!data.success) {
-                return res.status(400).json({ error: "Failed v2 verification" });
+                return res.status(400).json({ message: "Failed v2 verification" });
             }
 
         }
 
-        res.status(400).json({ error: "Invalid request type" });
+        if (!type) {
+            return res.status(400).json({ message: "Recaptcha type is required." });
+        }
+
+        if (type !== "v2" && type !== "v3") {
+            return res.status(400).json({ message: "Recaptcha type must be either v2 or v3." });
+        }
+
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Verification failed" });
+        res.status(500).json({ message: "Verification failed" });
     }
 
     const { data, error } = await supabase.auth.signUp({
