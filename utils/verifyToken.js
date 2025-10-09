@@ -36,7 +36,6 @@ export default async function verifyToken(req, res, next) {
                         httpOnly: true,
                         secure: process.env.NODE_ENV === 'production',
                         sameSite: 'none',
-                        secure: process.env.NODE_ENV === 'production',
                         path: '/',
                         maxAge: 60 * 60 * 1000,
                         domain: process.env.NODE_ENV === 'production' ? '.kolekto.com.ng' : undefined

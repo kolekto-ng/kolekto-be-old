@@ -3,7 +3,12 @@ import {
     getAllKycDocuments,
     getUserKycDocuments,
     getKycVerifications,
-    getSingleKycVerification
+    getSingleKycVerification,
+    approveKyc,
+    rejectKyc,
+    approveDocument,
+    rejectDocument,
+    addNote
 } from "../../controllers/admin/kyc.js";
 import verifyToken from "../../utils/verifyToken.js";
 
@@ -20,5 +25,20 @@ router.get("/kyc-verifications", verifyToken, getKycVerifications);
 
 // Get a single KYC verification
 router.get("/kyc-verifications/:id", verifyToken, getSingleKycVerification);
+
+// Approve KYC verification
+router.post("/kyc-verifications/:id/approve", verifyToken, approveKyc);
+
+// Reject KYC verification
+router.post("/kyc-verifications/:id/reject", verifyToken, rejectKyc);
+
+// Approve specific document
+router.post("/kyc-documents/:documentId/approve", verifyToken, approveDocument);
+
+// Reject specific document
+router.post("/kyc-documents/:documentId/reject", verifyToken, rejectDocument);
+
+// Add note to KYC verification
+router.post("/kyc-verifications/:id/add-note", verifyToken, addNote);
 
 export default router;
