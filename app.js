@@ -10,6 +10,7 @@ import withdrawalRouter from "./routes/withdrawal.js";
 import profileRouter from "./routes/settings/profile.js";
 import kycRouter from "./routes/settings/kyc.js";
 import landingPageRouter from "./routes/landingPage.js";
+import adminRouter from "./routes/admin/kyc.js";
 import helmet from "helmet";
 dotenv.config();
 
@@ -52,6 +53,7 @@ app.use("/api/withdrawals", withdrawalRouter);
 app.use("/api/settings/profile", profileRouter);
 app.use("/api/settings/kyc", kycRouter);
 app.use("/api/landing-page", landingPageRouter);
+app.use("/api/adminurlabdkole", adminRouter);
 
 const port = process.env.PORT || 5000;
 
