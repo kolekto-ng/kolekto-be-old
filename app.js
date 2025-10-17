@@ -4,12 +4,14 @@ import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import authRouter from "./routes/auth.js";
 import collectorRouter from "./routes/collection.js";
+import dashboardRouter from "./routes/dashboard.js";
 import paymentRouter from "./routes/payment.js";
 import contributorRouter from "./routes/contribution.js";
 import withdrawalRouter from "./routes/withdrawal.js";
 import profileRouter from "./routes/settings/profile.js";
 import kycRouter from "./routes/settings/kyc.js";
 import landingPageRouter from "./routes/landingPage.js";
+import adminRouter from "./routes/admin/kyc.js";
 import helmet from "helmet";
 dotenv.config();
 
@@ -47,11 +49,13 @@ app.use(cookieParser());
 app.use("/api", contributorRouter);
 app.use("/api/auth", authRouter);
 app.use("/api", collectorRouter);
+app.use("/api/dashboard", dashboardRouter);
 app.use("/api/payments", paymentRouter);
 app.use("/api/withdrawals", withdrawalRouter);
 app.use("/api/settings/profile", profileRouter);
 app.use("/api/settings/kyc", kycRouter);
 app.use("/api/landing-page", landingPageRouter);
+app.use("/api/adminurlabdkole", adminRouter);
 
 const port = process.env.PORT || 5000;
 

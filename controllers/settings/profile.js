@@ -155,6 +155,7 @@ export const saveAccount = async (req, res) => {
         return res.status(400).json({ error: "Invalid provider" });
     }
 
+
     try {
         // 1️⃣ Fetch user profile
         const { data: profile, error: profileErr } = await supabase
@@ -164,6 +165,7 @@ export const saveAccount = async (req, res) => {
             .single();
         if (profileErr) throw profileErr;
         if (!profile) return res.status(404).json({ error: "User profile not found" });
+        // i need to end this function if the user is yet to verify their identity
 
         // 2️⃣ Verify account with provider
         const { account_name } = await verifyAccount(account_number, bank_code, provider);
@@ -176,8 +178,8 @@ export const saveAccount = async (req, res) => {
 
         if (similarity < 0.7) {
             return res.status(400).json({
-                error: "Bank account name does not sufficiently match profile name",
-                details: { profileName: profile.full_name, bankAccountName: account_name, similarityScore: similarity.toFixed(2) }
+                message: "Bank account name does not sufficiently match profile name",
+                data: { profileName: profile.full_name, bankAccountName: account_name, similarityScore: similarity.toFixed(2) }
             });
         }
 
@@ -197,6 +199,9 @@ export const saveAccount = async (req, res) => {
         if (existingErr) throw existingErr;
 
         const is_default = existingAccounts.length === 0; // first account becomes default
+
+        // i also want to confirm the bank they are adding account name corresponds with their profile name
+
 
         // 7️⃣ Insert payout account
         const { data, error } = await supabase

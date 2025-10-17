@@ -16,7 +16,48 @@ export const uploadDocument = async (req, res, next) => {
             return res.status(400).json({ error: "No files uploaded" });
         }
 
-        // 1️⃣ Create parent verification request
+        // 0️⃣ Ensure KYC verification record exists and is pending
+        let kycVerificationId;
+        const { data: existingKyc, error: kycError } = await supabase
+            .from("kyc_verifications")
+            .select("id, status")
+            .eq("user_id", userId)
+            .single();
+
+        if (kycError && kycError.code !== "PGRST116") {
+            // Not a "no rows found" error
+            console.error("DB error (kyc_verifications):", kycError);
+            return res.status(500).json({ error: "Failed to check KYC verification", details: kycError.message });
+        }
+
+        if (!existingKyc) {
+            // Create new KYC verification record
+            const { data: newKyc, error: newKycError } = await supabase
+                .from("kyc_verifications")
+                .insert([{ user_id: userId, status: "pending" }])
+                .select("id")
+                .single();
+            if (newKycError) {
+                console.error("DB error (create kyc_verifications):", newKycError);
+                return res.status(500).json({ error: "Failed to create KYC verification", details: newKycError.message });
+            }
+            kycVerificationId = newKyc.id;
+        } else {
+            // Update existing KYC verification record to pending and update timestamp
+            const { data: updatedKyc, error: updateKycError } = await supabase
+                .from("kyc_verifications")
+                .update({ status: "pending", updated_at: new Date().toISOString() })
+                .eq("id", existingKyc.id)
+                .select("id")
+                .single();
+            if (updateKycError) {
+                console.error("DB error (update kyc_verifications):", updateKycError);
+                return res.status(500).json({ error: "Failed to update KYC verification", details: updateKycError.message });
+            }
+            kycVerificationId = updatedKyc.id;
+        }
+
+        // 1️⃣ Create parent verification request (kyc_documents)
         const { data: docRow, error: docError } = await supabase
             .from("kyc_documents")
             .insert([{
@@ -70,7 +111,7 @@ export const uploadDocument = async (req, res, next) => {
             }
         }
 
-        return res.json({ success: true, document_id: documentId });
+        return res.json({ success: true, document_id: documentId, kyc_verification_id: kycVerificationId });
     } catch (err) {
         console.error("General error (uploadDocument):", err);
         return res.status(500).json({ error: "Upload failed", details: err.message });
