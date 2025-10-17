@@ -1,0 +1,44 @@
+import express from "express";
+import {
+    getAllKycDocuments,
+    getUserKycDocuments,
+    getKycVerifications,
+    getSingleKycVerification,
+    approveKyc,
+    rejectKyc,
+    approveDocument,
+    rejectDocument,
+    addNote
+} from "../../controllers/admin/kyc.js";
+import verifyToken from "../../utils/verifyToken.js";
+
+const router = express.Router();
+
+// Get all KYC submissions (all users)
+router.get("/kyc-documents", verifyToken, getAllKycDocuments);
+
+// Get all KYC documents/files for a specific user
+router.get("/kyc-documents/:userId", verifyToken, getUserKycDocuments);
+
+// Get all KYC verifications
+router.get("/kyc-verifications", verifyToken, getKycVerifications);
+
+// Get a single KYC verification
+router.get("/kyc-verifications/:id", verifyToken, getSingleKycVerification);
+
+// Approve KYC verification
+router.post("/kyc-verifications/:id/approve", verifyToken, approveKyc);
+
+// Reject KYC verification
+router.post("/kyc-verifications/:id/reject", verifyToken, rejectKyc);
+
+// Approve specific document
+router.post("/kyc-documents/:documentId/approve", verifyToken, approveDocument);
+
+// Reject specific document
+router.post("/kyc-documents/:documentId/reject", verifyToken, rejectDocument);
+
+// Add note to KYC verification
+router.post("/kyc-verifications/:id/add-note", verifyToken, addNote);
+
+export default router;
