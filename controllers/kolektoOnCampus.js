@@ -33,6 +33,19 @@ export const joinCampus = async (req, res, next) => {
         return res.status(400).json({ message: "Invalid phone number format." });
     }
 
+    const { data: hasUserSignedUp, error: hasUserSignedUpError } = await supabase
+        .from('profiles')
+        .select('email')
+        .eq('email', email)
+        .single();
+
+    if (!hasUserSignedUp) {
+        return res.status(409).json({ message: "Please sign up before Joining a campus on Kolekto." });
+    }
+
+    if (hasUserSignedUpError && hasUserSignedUpError.code !== 'PGRST116') { // PGRST116: No rows found
+        return res.status(500).json({ message: "Error checking user signup status." });
+    }
     // 4. Check if email or phone number already exists
     const { data: existingStudent, error: studentError } = await supabase
         .from('students')
