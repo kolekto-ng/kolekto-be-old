@@ -16,6 +16,7 @@ export const createCollection = async (req, res) => {
         currency,
         currency_symbol,
         code_prefix,
+        support,
         price_tiers, // <-- array of tiers if tiered
     } = req.body;
 
@@ -198,6 +199,7 @@ export const createCollection = async (req, res) => {
                     currency: currency || "NGN",
                     currency_symbol: currency_symbol || "₦",
                     total_contributions: 0,
+                    support_phone_number: support,
                     price_tiers:
                         collectionType === "tiered"
                             ? price_tiers.map((tier) => ({
@@ -265,6 +267,7 @@ export const getUserCollections = async (req, res) => {
                 wallets (
                     id,
                     available_balance,
+                    pending_balance,
                     ledger_balance,
                     gross_payment,
                     net_payment,

@@ -59,7 +59,7 @@ export const getSingleCollection = async (req, res) => {
 
 export const createContribution = async (req, res) => {
     const { contributor, collectionType } = req.body;
-    let { name, email, phone, amount, contributionInformation, collectionId } = contributor || {};
+    let { name, email, phoneNumber, amount, contributionInformation, collectionId } = contributor || {};
 
     // Validate required fields
     const requiredFields = ["name", "email", "amount"];
@@ -208,7 +208,7 @@ export const createContribution = async (req, res) => {
                 collection_id: collectionId,
                 name,
                 email,
-                phone,
+                phone: phoneNumber,
                 amount: parsedAmount,
                 contributor_information: contributionInformation || [],
                 status: "pending",
