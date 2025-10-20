@@ -19,6 +19,6 @@ router.post("/reject", verifyToken, rejectWithdrawal);
 router.get("/banks-data", getBanksData);
 router.get("/", verifyToken, getUserWithdrawals); // Assuming this is for testing or listing withdrawals
 // Paystack webhook for withdrawals
-router.post("/webhook", handlePaystackWebhook);
+// router.post("/webhook", handlePaystackWebhook);
 
 export default router;
