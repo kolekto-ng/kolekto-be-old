@@ -13,40 +13,49 @@ const paystackHeaders = {
 };
 
 export const requestWithdrawal = async (req, res) => {
-    const { organizer_id: userId, collection_id, amount, account_number: accountNumber, account_name: accountName, bank_name: userBankName } = req.body;
-
-    // 1. Validate input and check wallet balance
-    const { data: wallet } = await supabase
-        .from("wallets")
-        .select("*")
-        .eq("collection_id", collection_id)
-        .single();
-
-    if (!wallet || amount > wallet.available_balance) {
-        return res.status(400).json({ error: "Insufficient balance" });
-    }
+    const {
+        organizer_id: userId,
+        collection_id,
+        amount,
+        account_number: accountNumber,
+        account_name: accountName,
+        bank_name: userBankName
+    } = req.body;
 
     try {
+        // 1. Fetch wallet and validate balance
+        const { data: wallet, error: walletError } = await supabase
+            .from("wallets")
+            .select("*")
+            .eq("collection_id", collection_id)
+            .single();
 
-        function getBankCodeByName(banks, bankName) {
-            const bank = banks.find(b => b.name.toLowerCase() === bankName.toLowerCase());
-            return bank ? bank.code : null;
+        if (walletError || !wallet) {
+            return res.status(404).json({ error: "Wallet not found" });
         }
 
-        // 1. Get all banks from Paystack
-        const banksRes = await axios.get(
-            "https://api.paystack.co/bank?currency=NGN",
-            { headers: paystackHeaders }
-        );
+        const available = Number(wallet.available_balance || 0);
+        const withdrawalAmount = Number(amount);
+
+        if (withdrawalAmount <= 0 || withdrawalAmount > available) {
+            return res.status(400).json({ error: "Insufficient available balance" });
+        }
+
+        // 2. Fetch bank list from Paystack
+        const banksRes = await axios.get("https://api.paystack.co/bank?currency=NGN", {
+            headers: paystackHeaders,
+        });
         const banks = banksRes.data.data;
 
-        // 2. Find the code for the user's bank
-        const bankCode = getBankCodeByName(banks, userBankName);
-        if (!bankCode) {
-            return res.status(400).json({ error: "Invalid bank name" });
-        }
+        const getBankCodeByName = (banks, bankName) => {
+            const bank = banks.find((b) => b.name.toLowerCase() === bankName.toLowerCase());
+            return bank ? bank.code : null;
+        };
 
-        // Check if recipient exists
+        const bankCode = getBankCodeByName(banks, userBankName);
+        if (!bankCode) return res.status(400).json({ error: "Invalid bank name" });
+
+        // 3. Find or create transfer recipient
         const { data: existingRecipient } = await supabase
             .from("transfer_recipients")
             .select("*")
@@ -56,11 +65,9 @@ export const requestWithdrawal = async (req, res) => {
             .single();
 
         let recipientCode;
-
         if (existingRecipient) {
             recipientCode = existingRecipient.recipient_code;
         } else {
-            // Create recipient on Paystack
             const recipientRes = await axios.post(
                 "https://api.paystack.co/transferrecipient",
                 {
@@ -69,73 +76,81 @@ export const requestWithdrawal = async (req, res) => {
                     account_number: accountNumber,
                     bank_code: bankCode,
                     bank_name: userBankName,
-                    currency: "NGN"
+                    currency: "NGN",
                 },
                 { headers: paystackHeaders }
             );
             recipientCode = recipientRes.data.data.recipient_code;
 
-            // Save recipient in DB
-            await supabase.from("transfer_recipients").insert([{
+            await supabase.from("transfer_recipients").insert([
+                {
+                    user_id: userId,
+                    account_number: accountNumber,
+                    bank_code: bankCode,
+                    account_name: accountName,
+                    bank_name: userBankName,
+                    recipient_code: recipientCode,
+                    currency: "NGN",
+                },
+            ]);
+        }
+
+        // 4. Create withdrawal record (status: pending)
+        const transferCode = "TRF_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+
+        const { error: insertError } = await supabase.from("withdrawals").insert([
+            {
                 user_id: userId,
-                account_number: accountNumber,
-                bank_code: bankCode,
-                account_name: accountName,
-                bank_name: userBankName,
-                recipient_code: recipientCode,
-                currency: "NGN"
-            }]);
-        }
-
-        // 3. Initiate transfer
-        // const transferRes = await axios.post(
-        //     "https://api.paystack.co/transfer",
-        //     {
-        //         source: "balance",
-        //         amount: Math.round(amount * 100), // Paystack expects kobo
-        //         recipient: recipientCode,
-        //         reason: "Withdrawal from Kolekto"
-        //     },
-        //     { headers: paystackHeaders }
-        // );
-        // const transferData = transferRes.data.data;
-
-        // Generate a random transfer code
-        function generateTransferCode() {
-            return "TRF_" + Math.random().toString(36).substr(2, 9).toUpperCase();
-        }
-        const transferCode = generateTransferCode();
-        // 4. Save withdrawal record (status: pending)
-        await supabase.from("withdrawals").insert([{
-            user_id: userId,
-            collection_id: collection_id,
-            amount,
-            status: "pending",
-            destination_account: {
-                accountNumber,
-                bankCode,
-                accountName,
-                bank_name: userBankName
+                collection_id,
+                amount: withdrawalAmount,
+                status: "pending",
+                destination_account: {
+                    accountNumber,
+                    bankCode,
+                    accountName,
+                    bank_name: userBankName,
+                },
+                paystack_transfer_code: transferCode,
+                paystack_recipient_code: recipientCode,
+                wallet_id: wallet.id,
             },
-            paystack_transfer_code: transferCode,
-            paystack_recipient_code: recipientCode,
-            wallet_id: wallet.id
-        }]);
+        ]);
 
-        // 5. Deduct from wallet.available_balance immediately
-        const wal = await supabase
+        if (insertError) throw insertError;
+
+        // 5. Move funds to pending_withdrawal (lock them)
+        const newAvailable = available - withdrawalAmount;
+        const newPendingWithdrawal = Number(wallet.pending_withdrawal || 0) + withdrawalAmount;
+
+        const { error: walletUpdateError } = await supabase
             .from("wallets")
             .update({
-                available_balance: wallet.available_balance - amount
+                available_balance: newAvailable,
+                pending_withdrawal: newPendingWithdrawal,
+                updated_at: new Date(),
             })
             .eq("id", wallet.id);
 
-        return res.status(200).json({ success: true, wallet });
-    } catch (error) {
+        if (walletUpdateError) throw walletUpdateError;
 
-        return res.status(500).json({ error: error.response?.data?.message || error.message });
+        // 6. Respond success
+        return res.status(200).json({
+            success: true,
+            message: "Withdrawal request submitted successfully",
+            withdrawal: {
+                amount: withdrawalAmount,
+                status: "pending",
+                transfer_code: transferCode,
+            },
+        });
+    } catch (error) {
+        console.error("Withdrawal request error:", error);
+        return res
+            .status(500)
+            .json({ error: error.response?.data?.message || error.message });
     }
 };
+
 
 // This should be added to your webhook route/controller
 export const handlePaystackWebhook = async (req, res) => {
@@ -319,29 +334,61 @@ export const approveWithdrawal = async (req, res) => {
         return res.status(404).json({ error: "Wallet not found" });
     }
 
-    // 4. Update the withdrawal status and adjust the wallet
-    const updatedWithdrawn = Number(wallet.withdrawn || 0) + Number(withdrawal.amount);
-    const updatedLedgerBalance = Number(wallet.ledger_balance || 0) - Number(withdrawal.amount);
+    const amount = Number(withdrawal.amount);
+    const available = Number(wallet.available_balance || 0);
 
-    const { error: updateError } = await supabase
+    // 4. Ensure available balance is sufficient
+    if (amount > available) {
+        return res.status(400).json({
+            error: `Insufficient available balance. Available: ${available}, Requested: ${amount}`,
+        });
+    }
+
+    // 5. Compute new balances
+    const updatedAvailable = available - amount;
+    const updatedWithdrawn = Number(wallet.withdrawn || 0) + amount;
+    const updatedLedger = Number(wallet.ledger_balance || 0) - amount;
+
+    // 6. Apply updates atomically (wallet first)
+    const { error: walletUpdateError } = await supabase
         .from("wallets")
         .update({
+            available_balance: updatedAvailable,
             withdrawn: updatedWithdrawn,
-            ledger_balance: updatedLedgerBalance
+            ledger_balance: updatedLedger,
+            updated_at: new Date(),
         })
         .eq("id", wallet.id);
 
-    if (updateError) {
-        return res.status(500).json({ error: "Failed to update wallet balances" });
+    if (walletUpdateError) {
+        return res
+            .status(500)
+            .json({ error: "Failed to update wallet balances", details: walletUpdateError });
     }
 
-    await supabase
+    // 7. Mark withdrawal as successful
+    const { error: withdrawalUpdateError } = await supabase
         .from("withdrawals")
-        .update({ status: "success" })
+        .update({ status: "success", approved_at: new Date() })
         .eq("id", withdrawal.id);
 
-    return res.status(200).json({ success: true, message: "Withdrawal approved and wallet updated successfully" });
+    if (withdrawalUpdateError) {
+        return res
+            .status(500)
+            .json({ error: "Failed to update withdrawal status", details: withdrawalUpdateError });
+    }
+
+    return res.status(200).json({
+        success: true,
+        message: "Withdrawal approved and wallet updated successfully",
+        new_balances: {
+            available_balance: updatedAvailable,
+            withdrawn: updatedWithdrawn,
+            ledger_balance: updatedLedger,
+        },
+    });
 };
+
 
 export const rejectWithdrawal = async (req, res) => {
     const { id: withdrawal_id } = req.body;

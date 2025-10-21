@@ -45,11 +45,15 @@ function calculateFees(amount, feeBearer = "organizer") {
  * Safely update wallet stats after a successful deposit/payment.
  * Handles edge cases: duplicate payments, missing wallet, zero/negative amount.
  */
+/**
+ * Safely update wallet stats after a successful deposit/payment.
+ * Now supports pending balance (T+1 settlement).
+ */
 export async function updateWalletStats(collectionId, amount) {
     if (!collectionId || !amount || amount <= 0) return;
     console.log(collectionId, amount, '<< updating wallet stats...');
 
-    // Fetch both wallet and collection data in parallel
+    // Fetch wallet and collection data
     const [walletResult, collectionResult] = await Promise.all([
         supabase.from("wallets").select("*").eq("collection_id", collectionId).single(),
         supabase.from("collections").select("fee_bearer, type").eq("id", collectionId).single()
@@ -57,78 +61,44 @@ export async function updateWalletStats(collectionId, amount) {
 
     const { data: wallet, error: walletError } = walletResult;
     const { data: collection, error: collectionError } = collectionResult;
-
     if (walletError || !wallet || collectionError || !collection) return;
 
     let netToAdd = Number(amount);
     console.log(wallet.fee_breakdown.tiers, collection, '<< wallet and collection details');
 
-    // If organizer pays fees, deduct them from the net amount
+    // === Fee handling logic ===
     if (collection.type === "fixed") {
         const fees = Number(wallet?.fee_breakdown?.totalFees || 0);
-
-        if (collection.fee_bearer === "contributor") {
-            // contributor already covered fees, so wallet gets full amount
-            netToAdd = Number(amount) - fees;;
-            console.log(netToAdd, '<< net to add for contributor pays fees');
-
-        } else {
-            // organizer covers fees, deduct from wallet
-            netToAdd = Number(amount) - fees;
-            if (netToAdd < 0) netToAdd = 0;
-        }
-    } else if (collection.type === "tiered") {
-        // Tiered
-        console.log(wallet.fee_breakdown, '<< wallet tiers');
-
-        const tierObj = wallet.fee_breakdown?.tiers?.find(
-            t => t.totalPayable === netToAdd
-        );
-
-        console.log(tierObj, '<< this is the tier object');
-
-
-        const tierFees = Number(tierObj?.totalFees || 0);
-
-        if (collection.fee_bearer === "contributor") {
-            // Contributor paid: tierAmount + fees
-            netToAdd = Number(amount) - tierFees;
-            console.log(netToAdd, '<< net to add for contributor pays fees');
-
-        } else {
-            // Organizer pays: fees deducted from wallet
-            netToAdd = Number(amount) - tierFees;
-            if (netToAdd < 0) netToAdd = 0;
-        }
-    }
-
-    if (collection.type === "fundraising") {
-        const fees = 1.025
-        netToAdd = (amount / fees);
-        netToAdd = parseFloat(netToAdd.toFixed(2));
-        console.log(netToAdd, '<< net to add for contributor pays fees');
+        netToAdd = Number(amount) - fees;
         if (netToAdd < 0) netToAdd = 0;
+    } else if (collection.type === "tiered") {
+        const tierObj = wallet.fee_breakdown?.tiers?.find(t => t.totalPayable === netToAdd);
+        const tierFees = Number(tierObj?.totalFees || 0);
+        netToAdd = Math.max(Number(amount) - tierFees, 0);
+    } else if (collection.type === "fundraising") {
+        const fees = 1.025;
+        netToAdd = parseFloat((amount / fees).toFixed(2));
     }
 
-    // ✅ Correct use of grossToAdd and netToAdd
+    // === New Balance Calculations ===
     const newGrossPayment = Number(wallet.gross_payment || 0) + Number(amount);
     const newNetPayment = Number(wallet.net_payment || 0) + netToAdd;
-    const newAvailableBalance = Number(wallet.available_balance || 0) + netToAdd;
+    const newPendingBalance = Number(wallet.pending_balance || 0) + netToAdd;
     const newLedgerBalance = Number(wallet.ledger_balance || 0) + netToAdd;
 
-
-    // Update wallet
+    // === Update wallet (T+1 logic) ===
     await supabase
         .from("wallets")
         .update({
             gross_payment: newGrossPayment,
             net_payment: newNetPayment,
-            available_balance: newAvailableBalance,
-            ledger_balance: newLedgerBalance
+            pending_balance: newPendingBalance,
+            ledger_balance: newLedgerBalance,
+            updated_at: new Date()
         })
         .eq("id", wallet.id);
 
-    // Update total contributions in collection
+    // === Increment collection contributions ===
     const { data: currentCollection } = await supabase
         .from("collections")
         .select("total_contributions")
@@ -141,7 +111,10 @@ export async function updateWalletStats(collectionId, amount) {
             total_contributions: (currentCollection?.total_contributions || 0) + 1
         })
         .eq("id", collectionId);
+
+    console.log('✅ Wallet stats updated (pending balance only, T+1 settlement applies)');
 }
+
 
 // Initialize Paystack secret key from environment variables
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
@@ -156,42 +129,52 @@ const paystackHeaders = {
 
 // Initialize a payment (get payment link)
 export const initializePayment = async (req, res) => {
-    let { fullName, email, phoneNumber, collectionType, amount, collectionId, callback_url } = req.body;
+    const {
+        fullName,
+        email,
+        phoneNumber,
+        amount,
+        collectionId,
+        callback_url
+    } = req.body;
 
     if (!email || !amount || !fullName || !collectionId) {
         return res.status(400).json({ error: "Missing required fields" });
     }
 
-    let contributorId = null;
-    let paymentId = null;
-
     try {
-        // 1. Create a contribution record
-        const contributionResult = await createContribution(req, res);
 
+        // const { data: collection } = await supabase
+        //     .from("collections")
+        //     .select("*")
+        //     .eq("id", collectionId)
+        //     .single();
+
+        // const contributionResult = await createContribution(collection, req.body);
+
+        // then initialize Paystack and respond quickly
+
+        // 1️⃣ Create contribution record first
+        const contributionResult = await createContribution(req, res);
         if (res.headersSent) return;
-        console.log(amount, '<< amount in initializePayment', contributionResult);
 
         const contributor = contributionResult?.contributor;
-        console.log(contributor, '<< this is the contributor');
-
-        contributorId = contributor?.id;
-
-        if (!contributorId) {
+        if (!contributor?.id) {
             return res.status(500).json({ error: "Failed to create contribution record" });
         }
 
-        // 2. Initialize payment with Paystack
-        const response = await axios.post(
+        const contributorId = contributor.id;
+
+        // 2️⃣ Initialize payment with Paystack (the slowest part)
+        const paystackRes = await axios.post(
             `${PAYSTACK_BASE_URL}/transaction/initialize`,
             {
                 email,
                 amount: Math.round(contributor.amount * 100),
-                callback_url: callback_url, // Your callback URL
+                callback_url,
                 metadata: {
                     fullName,
                     phoneNumber,
-                    ampunt: contributor.amount,
                     contributorId,
                     collectionId,
                 },
@@ -199,71 +182,96 @@ export const initializePayment = async (req, res) => {
             { headers: paystackHeaders }
         );
 
-        const paystackData = response.data.data;
+        const paystackData = paystackRes.data.data;
 
-        // 3. Save payment record in Supabase
-        const { data: wallet } = await supabase
+        // 3️⃣ Insert deposit (minimal data)
+        const { data: wallet, error: walletError } = await supabase
             .from("wallets")
-            .select("id")
+            .select("*")
             .eq("collection_id", collectionId)
             .single();
 
-        const { data: payment, error: depositsError } = await supabase
+        const [walletResult, collectionResult] = await Promise.all([
+            supabase.from("wallets").select("*").eq("collection_id", collectionId).single(),
+            supabase.from("collections").select("fee_bearer, type").eq("id", collectionId).single()
+        ]);
+
+        // const { data: wallet, error: walletError } = walletResult;
+        const { data: collection, error: collectionError } = collectionResult;
+        if (walletError || !wallet || collectionError || !collection) return;
+
+        let netToAdd = Number(amount);
+        console.log(wallet.fee_breakdown, collection, '<< wallet and collection details');
+
+        // === Fee handling logic ===
+        if (collection.type === "fixed") {
+            const fees = Number(wallet?.fee_breakdown?.totalFees || 0);
+            netToAdd = Number(amount) - fees;
+            if (netToAdd < 0) netToAdd = 0;
+        } else if (collection.type === "tiered") {
+            const tierObj = wallet.fee_breakdown?.tiers?.find(t => t.totalPayable === netToAdd);
+            const tierFees = Number(tierObj?.totalFees || 0);
+            netToAdd = Math.max(Number(amount) - tierFees, 0);
+        } else if (collection.type === "fundraising") {
+            const fees = 1.025;
+            netToAdd = parseFloat((amount / fees).toFixed(2));
+        }
+
+        const { data: payment, error: paymentError } = await supabase
             .from("deposits")
-            .insert([{
-                full_name: fullName,
-                email,
-                phone_number: phoneNumber,
-                amount: contributor.amount,
-                status: "pending",
-                payment_reference: paystackData.reference,
-                access_code: paystackData.access_code, // Save access_code
-                authorization_url: paystackData.authorization_url, // Save authorization_url
-                contributor_id: contributorId,
-                wallet_id: wallet.id,
-                collection_id: collectionId,
-            }])
+            .insert([
+                {
+                    full_name: fullName,
+                    email,
+                    amount: contributor.amount,
+                    phone_number: phoneNumber,
+                    currency: contributor.currency || "NGN",
+                    net_amount: netToAdd,
+                    status: "pending",
+                    payment_reference: paystackData.reference,
+                    authorization_url: paystackData.authorization_url,
+                    contributor_id: contributorId,
+                    wallet_id: wallet.id,
+                    collection_id: collectionId,
+                },
+            ])
             .select()
             .single();
 
-        if (depositsError) {
-            // Rollback: delete the contribution
-            await supabase.from("contributions").delete().eq("id", contributorId);
-            return res.status(500).json({ error: depositsError.message });
-        }
-        paymentId = payment.id;
+        if (paymentError) throw Error;
 
-        // 4. Optionally update contributor with payment reference
-        const { error: updateError } = await supabase
-            .from("contributions")
-            .update({ payment_id: paymentId })
-            .eq("id", contributorId);
-
-        if (updateError) {
-            // Rollback: delete both payment and contribution
-            await supabase.from("deposits").delete().eq("id", depositId);
-            await supabase.from("contributions").delete().eq("id", contributorId);
-            return res.status(500).json({ error: updateError.message });
-        }
-
-        // 5. Respond with Paystack payment link
+        // ⚡ Respond immediately
         res.status(200).json({
             message: "Payment initialized successfully",
             authorizationUrl: paystackData.authorization_url,
             reference: paystackData.reference,
         });
+
+        // 4️⃣ Background updates (non-blocking)
+        // These run after the response is sent.
+        (async () => {
+            try {
+                await supabase
+                    .from("contributions")
+                    .update({ payment_id: payment.id })
+                    .eq("id", contributorId);
+
+                await supabase
+                    .from("deposits")
+                    .update({ phone_number: phoneNumber })
+                    .eq("id", payment.id);
+            } catch (err) {
+                console.error("Background update failed:", err.message);
+            }
+        })();
     } catch (error) {
-        // Rollback: delete any created records if IDs exist
-        if (paymentId) {
-            await supabase.from("deposits").delete().eq("id", depositId);
-        }
-        if (contributorId) {
-            await supabase.from("contributions").delete().eq("id", contributorId);
-        }
         console.error("Error in initializePayment:", error);
-        return res.status(500).json({ error: error.response?.data?.message || error.message });
+        return res.status(500).json({
+            error: error.response?.data?.message || error.message,
+        });
     }
 };
+
 
 const formatDetails = (infoArr) => {
     if (!Array.isArray(infoArr)) return [];
@@ -471,6 +479,7 @@ export const fetchTransaction = async (req, res) => {
 
 // Handle Paystack webhook (for payment events)
 import crypto from "node:crypto"; // Ensures Node built-in is used
+import { error } from "node:console";
 
 // Helper: Verify Paystack signature (works in Node and edge runtimes)
 async function verifyPaystackSignature(req) {
@@ -503,8 +512,9 @@ async function verifyPaystackSignature(req) {
 }
 
 export const handleWebhook = async (req, res) => {
-    console.log("webhook event received: deposit", req.body);
+    console.log("Webhook event received:", req.body);
 
+    // 1. Verify Paystack signature
     const isValid = await verifyPaystackSignature(req);
     if (!isValid) {
         return res.status(403).json({ error: "Invalid signature" });
@@ -512,34 +522,42 @@ export const handleWebhook = async (req, res) => {
 
     const event = req.body;
 
-    // Only handle successful charges
+    // 2. Only process successful charges
     if (event.event === "charge.success") {
         const reference = event.data.reference;
-        console.log(reference, '<< webhook reference');
+        console.log("Processing charge.success for reference:", reference);
 
-        // Fetch payment by reference
-        const { data: deposit, error } = await supabase
+        // 3. Fetch matching deposit record
+        const { data: deposit, error: depositError } = await supabase
             .from("deposits")
             .select("*")
             .eq("payment_reference", reference)
             .single();
 
-        if (error || !deposit) {
+        if (depositError || !deposit) {
+            console.error("Deposit not found:", reference);
             return res.status(404).json({ error: "Payment not found" });
         }
 
-        // If already marked as success, do nothing
+        // 4. Skip if already processed
         if (deposit.status === "success") {
+            console.log("Deposit already processed:", reference);
             return res.status(200).send("Already processed");
         }
 
-        // Update deposit status
+        // 5. Mark deposit as successful
         await supabase
             .from("deposits")
-            .update({ status: "success", updated_at: new Date() })
+            .update({
+                paid_at: event.data.paidAt ? new Date(event.data.paidAt) : new Date(),
+                channel: paystackData.channel || null,
+                currency: paystackData.currency || 'NGN',
+                status: event.data.status,
+                updated_at: new Date(),
+            })
             .eq("id", deposit.id);
 
-        // Update contribution status
+        // 6. Update related contribution
         if (deposit.contributor_id) {
             const { data: collection } = await supabase
                 .from("collections")
@@ -561,7 +579,7 @@ export const handleWebhook = async (req, res) => {
                     .from("contributions")
                     .update({
                         status: "paid",
-                        contributor_unique_code: uniqueCode
+                        contributor_unique_code: uniqueCode,
                     })
                     .eq("id", deposit.contributor_id);
             } else {
@@ -572,13 +590,18 @@ export const handleWebhook = async (req, res) => {
             }
         }
 
-        // Update collection stats
+        // 7. Credit wallet (adds to pending_balance)
         await updateWalletStats(deposit.collection_id, deposit.amount);
+
+        console.log(
+            `✅ Deposit confirmed | Collection: ${deposit.collection_id} | ₦${deposit.amount}`
+        );
     }
 
-    // Always respond quickly to Paystack
+    // 8. Always respond 200 to Paystack to stop retries
     res.status(200).send("Webhook received");
 };
+
 
 // Export all controllers
 export default {
