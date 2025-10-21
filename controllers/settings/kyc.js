@@ -2,6 +2,9 @@ import { supabase } from "../../utils/client.js";
 
 // assumes you're using something like multer for file uploads
 export const uploadDocument = async (req, res, next) => {
+    const insertedDocs = [];
+    const uploadedPaths = [];
+
     try {
         const userId = req.user.id;
         const { documentType, verificationType } = req.body;
@@ -18,6 +21,8 @@ export const uploadDocument = async (req, res, next) => {
 
         // 0️⃣ Ensure KYC verification record exists and is pending
         let kycVerificationId;
+        let previousKycStatus = null;
+
         const { data: existingKyc, error: kycError } = await supabase
             .from("kyc_verifications")
             .select("id, status")
@@ -25,35 +30,30 @@ export const uploadDocument = async (req, res, next) => {
             .single();
 
         if (kycError && kycError.code !== "PGRST116") {
-            // Not a "no rows found" error
             console.error("DB error (kyc_verifications):", kycError);
-            return res.status(500).json({ error: "Failed to check KYC verification", details: kycError.message });
+            throw new Error("Failed to check KYC verification");
         }
 
         if (!existingKyc) {
-            // Create new KYC verification record
             const { data: newKyc, error: newKycError } = await supabase
                 .from("kyc_verifications")
                 .insert([{ user_id: userId, status: "pending" }])
                 .select("id")
                 .single();
-            if (newKycError) {
-                console.error("DB error (create kyc_verifications):", newKycError);
-                return res.status(500).json({ error: "Failed to create KYC verification", details: newKycError.message });
-            }
+
+            if (newKycError) throw new Error(`Failed to create KYC verification: ${newKycError.message}`);
             kycVerificationId = newKyc.id;
+            insertedDocs.push({ table: "kyc_verifications", id: kycVerificationId });
         } else {
-            // Update existing KYC verification record to pending and update timestamp
+            previousKycStatus = existingKyc.status;
             const { data: updatedKyc, error: updateKycError } = await supabase
                 .from("kyc_verifications")
                 .update({ status: "pending", updated_at: new Date().toISOString() })
                 .eq("id", existingKyc.id)
                 .select("id")
                 .single();
-            if (updateKycError) {
-                console.error("DB error (update kyc_verifications):", updateKycError);
-                return res.status(500).json({ error: "Failed to update KYC verification", details: updateKycError.message });
-            }
+
+            if (updateKycError) throw new Error(`Failed to update KYC verification: ${updateKycError.message}`);
             kycVerificationId = updatedKyc.id;
         }
 
@@ -69,11 +69,9 @@ export const uploadDocument = async (req, res, next) => {
             .select("id")
             .single();
 
-        if (docError) {
-            console.error("DB error (kyc_documents):", docError);
-            return res.status(500).json({ error: "Failed to insert kyc_documents", details: docError.message });
-        }
+        if (docError) throw new Error(`Failed to insert kyc_documents: ${docError.message}`);
         const documentId = docRow.id;
+        insertedDocs.push({ table: "kyc_documents", id: documentId });
 
         // 2️⃣ Upload each file to Supabase Storage + record in kyc_files
         for (let i = 0; i < uploadedFiles.length; i++) {
@@ -81,22 +79,17 @@ export const uploadDocument = async (req, res, next) => {
             const filePath = `${userId}/${Date.now()}-${file.originalname}`;
             console.log("Uploading file:", file.size);
 
-            // Upload to Supabase Storage
             const { error: storageError } = await supabase.storage
                 .from("kyc-documents")
                 .upload(filePath, file.buffer, {
-                    // cacheControl: "3600",
                     upsert: false,
                     contentType: file.mimetype,
                 });
 
-            if (storageError) {
-                console.error("Storage error (kyc-documents):", storageError);
-                return res.status(500).json({ error: "Failed to upload to storage", details: storageError.message });
-            }
+            if (storageError) throw new Error(`Failed to upload to storage: ${storageError.message}`);
+            uploadedPaths.push(filePath);
             console.log("Uploaded to storage:", filePath);
 
-            // Insert file metadata into kyc_files
             const { error: fileError } = await supabase.from("kyc_files").insert([{
                 document_id: documentId,
                 file_path: filePath,
@@ -105,18 +98,55 @@ export const uploadDocument = async (req, res, next) => {
                 file_type: file.mimetype,
             }]);
 
-            if (fileError) {
-                console.error("DB error (kyc_files):", fileError);
-                return res.status(500).json({ error: "Failed to insert kyc_files", details: fileError.message });
+            if (fileError) throw new Error(`Failed to insert kyc_files: ${fileError.message}`);
+        }
+
+        return res.json({
+            success: true,
+            document_id: documentId,
+            kyc_verification_id: kycVerificationId
+        });
+
+    } catch (err) {
+        console.error("General error (uploadDocument):", err);
+
+        // 🔄 Rollback uploaded files
+        if (uploadedPaths.length > 0) {
+            try {
+                await supabase.storage.from("kyc-documents").remove(uploadedPaths);
+                console.log("Rolled back uploaded files:", uploadedPaths);
+            } catch (rollbackErr) {
+                console.error("Rollback failed (storage):", rollbackErr.message);
             }
         }
 
-        return res.json({ success: true, document_id: documentId, kyc_verification_id: kycVerificationId });
-    } catch (err) {
-        console.error("General error (uploadDocument):", err);
+        // 🔄 Rollback inserted records (reverse order)
+        for (const record of insertedDocs.reverse()) {
+            try {
+                await supabase.from(record.table).delete().eq("id", record.id);
+                console.log(`Rolled back ${record.table}: ${record.id}`);
+            } catch (rollbackErr) {
+                console.error(`Rollback failed (${record.table}):`, rollbackErr.message);
+            }
+        }
+
+        // 🔄 Restore old KYC status if needed
+        if (previousKycStatus) {
+            try {
+                await supabase
+                    .from("kyc_verifications")
+                    .update({ status: previousKycStatus, updated_at: new Date().toISOString() })
+                    .eq("user_id", req.user.id);
+                console.log(`Restored previous KYC status: ${previousKycStatus}`);
+            } catch (restoreErr) {
+                console.error("Failed to restore previous KYC status:", restoreErr.message);
+            }
+        }
+
         return res.status(500).json({ error: "Upload failed", details: err.message });
     }
 };
+
 
 export const getDocuments = async (req, res) => {
     try {
