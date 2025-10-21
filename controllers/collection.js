@@ -217,7 +217,7 @@ export const createCollection = async (req, res) => {
             .single();
 
         if (error) {
-            return res.status(500).json({ error: error.message });
+            return res.status(500).json({ message: error.message });
         }
 
         // ------------------------
@@ -241,7 +241,7 @@ export const createCollection = async (req, res) => {
             // Rollback collection if wallet creation fails
             await supabase.from("collections").delete().eq("id", collection.id);
             return res.status(500).json({
-                error:
+                message:
                     "Collection created but wallet creation failed: " +
                     walletError.message,
             });
@@ -252,7 +252,7 @@ export const createCollection = async (req, res) => {
         console.error("Error creating collection:", error);
         return res
             .status(500)
-            .json({ error: "Unexpected server error: " + error.message });
+            .json({ message: "Unexpected server error: " + error.message });
     }
 };
 
