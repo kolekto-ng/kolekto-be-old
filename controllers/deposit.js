@@ -181,6 +181,7 @@ export const initializePayment = async (req, res) => {
             },
             { headers: paystackHeaders }
         );
+        console.log(paystackRes, 're pasytack');
 
         const paystackData = paystackRes.data.data;
 
