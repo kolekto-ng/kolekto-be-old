@@ -544,17 +544,15 @@ export const handleWebhook = async (req, res) => {
             console.log("Deposit already processed:", reference);
             return res.status(200).send("Already processed");
         }
-        console.log(event.data, 'event from paystavck');
 
         // 5. Mark deposit as successful
         await supabase
             .from("deposits")
             .update({
-                paid_at: new Date(),
-                // channel: paystackData.channel || null,
-                // currency: paystackData.currency || null,
-                // updated_at: new Date()
-                status: "success",
+                paid_at: event.data.paidAt ? new Date(event.data.paidAt) : new Date(),
+                channel: paystackData.channel || null,
+                currency: paystackData.currency || 'NGN',
+                status: event.data.status,
                 updated_at: new Date(),
             })
             .eq("id", deposit.id);
