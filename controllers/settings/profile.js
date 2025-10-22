@@ -16,9 +16,9 @@ export const getProfile = async (req, res, next) => {
         .single();
 
     const { data: userIdentity, error: userIdentityError } = await supabase
-        .from('user_identity') // Replace 'profiles' with your actual profile table name
+        .from('kyc_verifications') // Replace 'profiles' with your actual profile table name
         .select('*') // Select the fields you want to return
-        .eq('id', userId) // Assuming profile id matches user id
+        .eq('user_id', userId) // Assuming profile id matches user id
         .single();
 
     if (profileError) {
