@@ -359,9 +359,9 @@ export const approveWithdrawal = async (req, res) => {
         }
 
         // 5. Compute new balances
-        const updatedAvailable = available - amount;
-        const updatedWithdrawn = Number(wallet.withdrawn || 0) + amount;
-        const updatedLedger = Number(wallet.ledger_balance || 0) - amount;
+        let updatedAvailable = available - amount;
+        let updatedWithdrawn = Number(wallet.withdrawn || 0) + amount;
+        let updatedLedger = Number(wallet.ledger_balance || 0) - amount;
 
         // 6. Update wallet
         const { error: walletUpdateError } = await supabase
@@ -382,16 +382,19 @@ export const approveWithdrawal = async (req, res) => {
         const { error: withdrawalUpdateError } = await supabase
             .from("withdrawals")
             .update({ status: "success" })
-            .eq("id", withdrawal.id);
+            .eq("id", withdrawal_id);
 
         if (withdrawalUpdateError) {
             // 7a. rollback wallet update manually if this fails
+            updatedAvailable = available + amount;
+            updatedWithdrawn = Number(wallet.withdrawn || 0) - amount;
+            updatedLedger = Number(wallet.ledger_balance || 0) + amount;
             await supabase
                 .from("wallets")
                 .update({
                     available_balance: available,
-                    withdrawn: wallet.withdrawn,
-                    ledger_balance: wallet.ledger_balance,
+                    withdrawn: updatedWithdrawn,
+                    ledger_balance: updatedLedger,
                     updated_at: new Date(),
                 })
                 .eq("id", wallet.id);
