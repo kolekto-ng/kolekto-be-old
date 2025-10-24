@@ -22,18 +22,21 @@ export const requestWithdrawal = async (req, res) => {
         bank_name: userBankName
     } = req.body;
 
+    const client = supabase; // your initialized supabase client
+    let wallet, recipientCode, transferCode;
+
     try {
-        // 1. Fetch wallet and validate balance
-        const { data: wallet, error: walletError } = await supabase
+        // 1️⃣ Fetch wallet and validate balance
+        const { data: walletData, error: walletError } = await client
             .from("wallets")
             .select("*")
             .eq("collection_id", collection_id)
             .single();
 
-        if (walletError || !wallet) {
+        if (walletError || !walletData)
             return res.status(404).json({ error: "Wallet not found" });
-        }
 
+        wallet = walletData;
         const available = Number(wallet.available_balance || 0);
         const withdrawalAmount = Number(amount);
 
@@ -41,22 +44,31 @@ export const requestWithdrawal = async (req, res) => {
             return res.status(400).json({ error: "Insufficient available balance" });
         }
 
-        // 2. Fetch bank list from Paystack
+        // 2️⃣ Temporarily deduct balance (simulate pending lock)
+        const { error: debitError } = await client
+            .from("wallets")
+            .update({
+                available_balance: available - withdrawalAmount,
+                ledger_balance: wallet.ledger_balance - withdrawalAmount,
+                updated_at: new Date().toISOString(),
+            })
+            .eq("id", wallet.id);
+
+        if (debitError) throw new Error("Failed to update wallet balance");
+
+        // 3️⃣ Get valid bank code dynamically from Paystack
         const banksRes = await axios.get("https://api.paystack.co/bank?currency=NGN", {
             headers: paystackHeaders,
         });
         const banks = banksRes.data.data;
+        const bank = banks.find(
+            (b) => b.name.toLowerCase() === userBankName.toLowerCase()
+        );
+        if (!bank) throw new Error("Invalid bank name");
+        const bankCode = bank.code;
 
-        const getBankCodeByName = (banks, bankName) => {
-            const bank = banks.find((b) => b.name.toLowerCase() === bankName.toLowerCase());
-            return bank ? bank.code : null;
-        };
-
-        const bankCode = getBankCodeByName(banks, userBankName);
-        if (!bankCode) return res.status(400).json({ error: "Invalid bank name" });
-
-        // 3. Find or create transfer recipient
-        const { data: existingRecipient } = await supabase
+        // 4️⃣ Find or create transfer recipient
+        const { data: existingRecipient } = await client
             .from("transfer_recipients")
             .select("*")
             .eq("user_id", userId)
@@ -64,7 +76,6 @@ export const requestWithdrawal = async (req, res) => {
             .eq("bank_code", bankCode)
             .single();
 
-        let recipientCode;
         if (existingRecipient) {
             recipientCode = existingRecipient.recipient_code;
         } else {
@@ -75,65 +86,52 @@ export const requestWithdrawal = async (req, res) => {
                     name: accountName,
                     account_number: accountNumber,
                     bank_code: bankCode,
-                    bank_name: userBankName,
                     currency: "NGN",
                 },
                 { headers: paystackHeaders }
             );
             recipientCode = recipientRes.data.data.recipient_code;
 
-            await supabase.from("transfer_recipients").insert([
-                {
-                    user_id: userId,
-                    account_number: accountNumber,
-                    bank_code: bankCode,
-                    account_name: accountName,
-                    bank_name: userBankName,
-                    recipient_code: recipientCode,
-                    currency: "NGN",
-                },
-            ]);
+            const { error: recipientInsertError } = await client
+                .from("transfer_recipients")
+                .insert([
+                    {
+                        user_id: userId,
+                        account_number: accountNumber,
+                        bank_code: bankCode,
+                        account_name: accountName,
+                        bank_name: userBankName,
+                        recipient_code: recipientCode,
+                        currency: "NGN",
+                    },
+                ]);
+            if (recipientInsertError) throw new Error("Failed to save recipient");
         }
 
-        // 4. Create withdrawal record (status: pending)
-        const transferCode = "TRF_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+        // 5️⃣ Create withdrawal record
+        transferCode = "TRF_" + Math.random().toString(36).substr(2, 9).toUpperCase();
 
-        const { error: insertError } = await supabase.from("withdrawals").insert([
+        const { error: withdrawalError } = await client.from("withdrawals").insert([
             {
                 user_id: userId,
                 collection_id,
+                wallet_id: wallet.id,
                 amount: withdrawalAmount,
                 status: "pending",
                 destination_account: {
                     accountNumber,
-                    bankCode,
                     accountName,
+                    bankCode,
                     bank_name: userBankName,
                 },
                 paystack_transfer_code: transferCode,
                 paystack_recipient_code: recipientCode,
-                wallet_id: wallet.id,
             },
         ]);
 
-        if (insertError) throw insertError;
+        if (withdrawalError) throw new Error("Failed to record withdrawal");
 
-        // 5. Move funds to pending_withdrawal (lock them)
-        const newAvailable = available - withdrawalAmount;
-        const newPendingWithdrawal = Number(wallet.pending_withdrawal || 0) + withdrawalAmount;
-
-        const { error: walletUpdateError } = await supabase
-            .from("wallets")
-            .update({
-                available_balance: newAvailable,
-                pending_withdrawal: newPendingWithdrawal,
-                updated_at: new Date(),
-            })
-            .eq("id", wallet.id);
-
-        if (walletUpdateError) throw walletUpdateError;
-
-        // 6. Respond success
+        // ✅ Everything succeeded
         return res.status(200).json({
             success: true,
             message: "Withdrawal request submitted successfully",
@@ -143,13 +141,28 @@ export const requestWithdrawal = async (req, res) => {
                 transfer_code: transferCode,
             },
         });
+
     } catch (error) {
         console.error("Withdrawal request error:", error);
+
+        // 🧩 Rollback wallet deduction if anything fails
+        if (wallet && amount) {
+            await client
+                .from("wallets")
+                .update({
+                    available_balance: wallet.available_balance,
+                    ledger_balance: wallet.ledger_balance,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq("id", wallet.id);
+        }
+
         return res
             .status(500)
             .json({ error: error.response?.data?.message || error.message });
     }
 };
+
 
 
 // This should be added to your webhook route/controller
