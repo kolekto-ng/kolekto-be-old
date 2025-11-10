@@ -1,5 +1,43 @@
 import { supabase } from '../utils/client.js';
 
+// Helper function to generate slug from title
+const generateSlug = (title) => {
+    return title
+        .toLowerCase()
+        .trim()
+        .replace(/[^\w\s-]/g, '') // Remove special characters
+        .replace(/[\s_-]+/g, '-') // Replace spaces and underscores with hyphens
+        .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
+};
+
+// Helper function to ensure unique slug
+const ensureUniqueSlug = async (baseSlug) => {
+    let slug = baseSlug;
+    let counter = 1;
+    
+    while (true) {
+        const { data, error } = await supabase
+            .from('collections')
+            .select('id')
+            .eq('slug', slug)
+            .single();
+        
+        // If no record found, slug is unique
+        if (error && error.code === 'PGRST116') {
+            return slug;
+        }
+        
+        // If record exists, append counter
+        slug = `${baseSlug}-${counter}`;
+        counter++;
+        
+        // Safety check to prevent infinite loop
+        if (counter > 1000) {
+            return `${baseSlug}-${Date.now()}`;
+        }
+    }
+};
+
 // controllers/collections.js
 export const createCollection = async (req, res) => {
     let {
@@ -179,7 +217,16 @@ export const createCollection = async (req, res) => {
 
     try {
         // ------------------------
-        // 4. Insert collection
+        // 4. Generate slug if not provided
+        // ------------------------
+        let finalSlug = req.body.slug;
+        if (!finalSlug && title) {
+            const baseSlug = generateSlug(title);
+            finalSlug = await ensureUniqueSlug(baseSlug);
+        }
+
+        // ------------------------
+        // 5. Insert collection
         // ------------------------
         const { data: collection, error } = await supabase
             .from("collections")
@@ -200,6 +247,7 @@ export const createCollection = async (req, res) => {
                     currency_symbol: currency_symbol || "₦",
                     total_contributions: 0,
                     support_phone_number: support,
+                    slug: finalSlug, // Add slug to collection
                     price_tiers:
                         collectionType === "tiered"
                             ? price_tiers.map((tier) => ({
