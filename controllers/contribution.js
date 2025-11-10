@@ -23,9 +23,19 @@ export const getContributions = async (req, res) => {
 };
 
 export const getSingleCollection = async (req, res) => {
-    const { collectionId } = req.query;
+    const { collectionId, slug } = req.query;
 
-    const { data, error } = await supabase
+    // Determine if we're using ID or slug
+    // UUID format: 8-4-4-4-12 hex characters
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const identifier = collectionId || slug;
+
+    if (!identifier) {
+        return res.status(400).json({ error: "Collection ID or slug is required" });
+    }
+
+    // Build query - check if identifier is UUID (backward compatible) or slug
+    let query = supabase
         .from('collections')
         .select(`
             *,
@@ -40,19 +50,27 @@ export const getSingleCollection = async (req, res) => {
                 currency,
                 currency_symbol
             )
-        `)
-        .eq('id', collectionId)
-        .single();
+        `);
 
-    console.log(data, 'collectiopn data');
-    if (data?.max_contributions == data?.total_contributions) {
-        res.status(200).json({ message: "collection is full", data })
+    // If it looks like a UUID, use ID; otherwise use slug
+    if (uuidRegex.test(identifier)) {
+        query = query.eq('id', identifier);
+    } else {
+        query = query.eq('slug', identifier);
     }
+
+    const { data, error } = await query.single();
+
+    console.log(data, 'collection data');
 
     if (error) {
-        return res.status(404).json({ error: error.message });
+        return res.status(404).json({ message: error.message });
     }
 
+    // Check if collection is full
+    if (data?.max_contributions && data?.max_contributions == data?.total_contributions) {
+        return res.status(200).json({ message: "collection is full", data });
+    }
 
     return res.status(200).json({ data });
 };
@@ -76,12 +94,21 @@ export const createContribution = async (req, res) => {
     try {
         // Check if collection exists
         // ✅ Step 2: Fetch collection details
+        // Support both ID (UUID) and slug for backward compatibility
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-        const { data: collection, error: collectionError } = await supabase
+        let collectionQuery = supabase
             .from("collections")
-            .select("*")
-            .eq("id", collectionId)
-            .single();
+            .select("*");
+
+        // If it looks like a UUID, use ID; otherwise use slug
+        if (uuidRegex.test(collectionId)) {
+            collectionQuery = collectionQuery.eq("id", collectionId);
+        } else {
+            collectionQuery = collectionQuery.eq("slug", collectionId);
+        }
+
+        const { data: collection, error: collectionError } = await collectionQuery.single();
         if (collectionError || !collection) {
             return res.status(404).json({
                 success: false,
@@ -89,6 +116,8 @@ export const createContribution = async (req, res) => {
             });
         }
 
+        // Use the actual collection ID from the fetched collection
+        const actualCollectionId = collection.id;
 
         const { type: collection_type, fee_bearer, price_tiers, amount: collectionAmount } = collection;
         console.log(collection, '<< collection details');
@@ -183,7 +212,7 @@ export const createContribution = async (req, res) => {
             const { count, error: countError } = await supabase
                 .from("contributions")
                 .select("id", { count: "exact", head: true })
-                .eq("collection_id", collectionId)
+                .eq("collection_id", actualCollectionId)
                 .eq("status", "paid");
 
             if (countError) throw new Error("Failed to count participants");
@@ -205,7 +234,7 @@ export const createContribution = async (req, res) => {
         const { data: contributorData, error: contributorError } = await supabase
             .from("contributions")
             .insert([{
-                collection_id: collectionId,
+                collection_id: actualCollectionId,
                 name,
                 email,
                 phone: phoneNumber,
