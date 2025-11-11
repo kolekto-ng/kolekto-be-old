@@ -551,8 +551,8 @@ export const handleWebhook = async (req, res) => {
             .from("deposits")
             .update({
                 paid_at: event.data.paidAt ? new Date(event.data.paidAt) : new Date(),
-                channel: paystackData.channel || null,
-                currency: paystackData.currency || 'NGN',
+                channel: event.data.channel || null,
+                currency: event.data.currency || 'NGN',
                 status: event.data.status,
                 updated_at: new Date(),
             })
