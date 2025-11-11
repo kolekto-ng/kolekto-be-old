@@ -13,6 +13,7 @@ import kycRouter from "./routes/settings/kyc.js";
 import landingPageRouter from "./routes/landingPage.js";
 import adminRouter from "./routes/admin/kyc.js";
 import helmet from "helmet";
+import { verifyEmailConfig } from "./services/emailService.js";
 dotenv.config();
 
 const app = express();
@@ -60,6 +61,19 @@ app.use("/api/adminurlabdkole", adminRouter);
 const port = process.env.PORT || 5000;
 
 app.set('trust proxy', true);
-app.listen(port, () => {
+
+// Initialize email service
+const initializeEmailService = async () => {
+    const isReady = await verifyEmailConfig();
+    if (isReady) {
+        console.log('✅ Email service initialized successfully');
+    } else {
+        console.warn('⚠️ Email service not configured properly. Check your .env file.');
+    }
+};
+
+app.listen(port, async () => {
     console.log(`Server Running on port ${port}`);
+    // Initialize email service on startup
+    await initializeEmailService();
 });
