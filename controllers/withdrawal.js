@@ -193,7 +193,7 @@ export const requestWithdrawal = async (req, res) => {
                     });
 
                     await sendEmail({
-                        to: "abdullahimohammed3108@gmail.com",
+                        to: "gazalianfellow@gmail.com",
                         subject: `Withdrawal Approval Required - ${profile?.full_name || 'Requester'}`,
                         html: adminHtml,
                         text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}`
