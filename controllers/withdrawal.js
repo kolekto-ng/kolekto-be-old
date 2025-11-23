@@ -193,7 +193,7 @@ export const requestWithdrawal = async (req, res) => {
                     });
 
                     await sendEmail({
-                        to: "abdullahimohammed3108@gmail.com",
+                        to: "gazalianfellow@gmail.com",
                         subject: `Withdrawal Approval Required - ${profile?.full_name || 'Requester'}`,
                         html: adminHtml,
                         text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}`
@@ -488,7 +488,7 @@ export const approveWithdrawal = async (req, res) => {
                 });
 
                 await sendEmail({
-                    to: process.env.ADMIN_EMAIL || "abdullahimohammed3108@gmail.com",
+                    to: process.env.ADMIN_EMAIL || "gazalianfellow@gmail.com",
                     subject: `Withdrawal Processed - ${profile?.full_name || 'Requester'} - ${reference}`,
                     html: adminHtml,
                     text: `Withdrawal ${reference} of ${withdrawal.amount} ${withdrawal.currency || 'NGN'} has been processed for ${profile?.full_name || 'user'}.`
