@@ -1,5 +1,10 @@
 import axios from "axios";
 import { supabase } from "../utils/client.js";
+import { sendEmail } from "../services/emailService.js";
+import { withdrawalRequestTemplate } from "../templates/withdrawalRequest.js";
+import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawalApprovalRequest.js";
+import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
+import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
 
 // Initialize Paystack secret key from environment variables
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
@@ -87,50 +92,122 @@ export const requestWithdrawal = async (req, res) => {
             }]);
         }
 
-        // 3. Initiate transfer
-        // const transferRes = await axios.post(
-        //     "https://api.paystack.co/transfer",
-        //     {
-        //         source: "balance",
-        //         amount: Math.round(amount * 100), // Paystack expects kobo
-        //         recipient: recipientCode,
-        //         reason: "Withdrawal from Kolekto"
-        //     },
-        //     { headers: paystackHeaders }
-        // );
-        // const transferData = transferRes.data.data;
+
 
         // Generate a random transfer code
         function generateTransferCode() {
             return "TRF_" + Math.random().toString(36).substr(2, 9).toUpperCase();
         }
         const transferCode = generateTransferCode();
-        // 4. Save withdrawal record (status: pending)
-        await supabase.from("withdrawals").insert([{
-            user_id: userId,
-            collection_id: collection_id,
-            amount,
-            status: "pending",
-            destination_account: {
-                accountNumber,
-                bankCode,
-                accountName,
-                bank_name: userBankName
-            },
-            paystack_transfer_code: transferCode,
-            paystack_recipient_code: recipientCode,
-            wallet_id: wallet.id
-        }]);
+        // 4. Save withdrawal record (status: pending) and return inserted row
+        const { data: insertedWithdrawal, error: insertError } = await supabase.from("withdrawals")
+            .insert([{
+                user_id: userId,
+                collection_id: collection_id,
+                amount,
+                status: "pending",
+                destination_account: {
+                    accountNumber,
+                    bankCode,
+                    accountName,
+                    bank_name: userBankName
+                },
+                paystack_transfer_code: transferCode,
+                paystack_recipient_code: recipientCode,
+                wallet_id: wallet.id
+            }])
+            .select()
+            .single();
+
+        if (insertError || !insertedWithdrawal) {
+            console.error('Withdrawal insert error', insertError);
+            return res.status(500).json({ error: "Failed to create withdrawal record" });
+        }
 
         // 5. Deduct from wallet.available_balance immediately
-        const wal = await supabase
+        const { error: walUpdateError } = await supabase
             .from("wallets")
             .update({
                 available_balance: wallet.available_balance - amount
             })
             .eq("id", wallet.id);
 
-        return res.status(200).json({ success: true, wallet });
+        if (walUpdateError) {
+            console.error('Wallet update error', walUpdateError);
+            // continue — we still want to notify user/admin; but respond with failure
+            return res.status(500).json({ error: "Failed to update wallet balance" });
+        }
+
+        // Fetch requester profile (name + email) for sending email
+        const { data: profile } = await supabase
+            .from("profiles")
+            .select("full_name, email")
+            .eq("id", userId)
+            .single();
+
+        // Prepare and send emails (user + admin). Do not block response on email errors.
+        (async () => {
+            try {
+                // User email
+                try {
+                    const userHtml = withdrawalRequestTemplate({
+                        userName: profile?.full_name || "User",
+                        amount,
+                        currency: "NGN",
+                        withdrawalId: insertedWithdrawal.id,
+                        status: "received",
+                        accountName,
+                        accountNumber,
+                        bankName: userBankName,
+                        submittedAt: insertedWithdrawal.created_at || new Date().toISOString()
+                    });
+
+                    await sendEmail({
+                        to: profile?.email,
+                        subject: `Withdrawal Request Received - Kolekto`,
+                        html: userHtml,
+                        text: `We received your withdrawal request of ${amount}. Withdrawal ID: ${insertedWithdrawal.id}`
+                    });
+                    console.log('✅ Withdrawal request email sent to requester');
+                } catch (userMailErr) {
+                    console.error('Failed to send withdrawal email to user:', userMailErr?.message || userMailErr);
+                }
+
+                // Admin email (notify approver)
+                try {
+                    const approveUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/approve?id=${insertedWithdrawal.id}`;
+                    const declineUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/decline?id=${insertedWithdrawal.id}`;
+
+                    const adminHtml = withdrawalApprovalRequestTemplate({
+                        adminName: "Gazali",
+                        userName: profile?.full_name || "User",
+                        amount,
+                        currency: "NGN",
+                        withdrawalId: insertedWithdrawal.id,
+                        accountName,
+                        accountNumber,
+                        bankName: userBankName,
+                        submittedAt: insertedWithdrawal.created_at || new Date().toISOString(),
+                        approveUrl,
+                        declineUrl
+                    });
+
+                    await sendEmail({
+                        to: "abdullahimohammed3108@gmail.com",
+                        subject: `Withdrawal Approval Required - ${profile?.full_name || 'Requester'}`,
+                        html: adminHtml,
+                        text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}`
+                    });
+                    console.log('✅ Withdrawal approval request sent to admin');
+                } catch (adminMailErr) {
+                    console.error('Failed to send withdrawal approval email to admin:', adminMailErr?.message || adminMailErr);
+                }
+            } catch (err) {
+                console.error('Unexpected error sending withdrawal emails:', err?.message || err);
+            }
+        })();
+
+        return res.status(200).json({ success: true, wallet, withdrawal: insertedWithdrawal });
     } catch (error) {
 
         return res.status(500).json({ error: error.response?.data?.message || error.message });
@@ -339,6 +416,91 @@ export const approveWithdrawal = async (req, res) => {
         .from("withdrawals")
         .update({ status: "success" })
         .eq("id", withdrawal.id);
+
+    // Send notifications (fire-and-forget)
+    (async () => {
+        try {
+            // fetch requester profile
+            const { data: profile } = await supabase
+                .from("profiles")
+                .select("full_name, email")
+                .eq("id", withdrawal.user_id)
+                .single();
+
+            // refresh wallet balances for email
+            const { data: refreshedWallet } = await supabase
+                .from("wallets")
+                .select("ledger_balance, available_balance")
+                .eq("id", wallet.id)
+                .single();
+
+            const destination = withdrawal.destination_account || {};
+            const processedAt = new Date().toISOString();
+            const reference = withdrawal.paystack_transfer_code || withdrawal.id;
+
+            // user email
+            try {
+                const userHtml = withdrawalApprovedTemplate({
+                    userName: profile?.full_name || "User",
+                    amount: withdrawal.amount,
+                    currency: withdrawal.currency || "NGN",
+                    withdrawalId: withdrawal.id,
+                    processedAt,
+                    status: "Processed",
+                    accountName: destination.accountName || destination.account_name || "",
+                    accountNumber: destination.accountNumber || destination.account_number || "",
+                    bankName: destination.bank_name || destination.bankName || "",
+                    reference,
+                    currentBalance: refreshedWallet?.ledger_balance || 0,
+                    availableBalance: refreshedWallet?.available_balance || 0,
+                    dashboardUrl: process.env.FRONTEND_URL,
+                    supportEmail: process.env.SUPPORT_EMAIL || "support@kolekto.com.ng"
+                });
+
+                await sendEmail({
+                    to: profile?.email,
+                    subject: `Withdrawal Processed - ${reference}`,
+                    html: userHtml,
+                    text: `Your withdrawal of ${withdrawal.amount} ${withdrawal.currency || 'NGN'} has been processed. Reference: ${reference}`
+                });
+                console.log("✅ Withdrawal processed email sent to user");
+            } catch (userMailErr) {
+                console.error("Failed sending processed email to user:", userMailErr?.message || userMailErr);
+            }
+
+            // admin email
+            try {
+                const adminHtml = adminWithdrawalProcessedTemplate({
+                    adminName: "Admin",
+                    userName: profile?.full_name || "User",
+                    userEmail: profile?.email,
+                    userId: withdrawal.user_id,
+                    amount: withdrawal.amount,
+                    currency: withdrawal.currency || "NGN",
+                    withdrawalId: withdrawal.id,
+                    processedAt,
+                    accountName: destination.accountName || destination.account_name || "",
+                    accountNumber: destination.accountNumber || destination.account_number || "",
+                    bankName: destination.bank_name || destination.bankName || "",
+                    reference,
+                    walletLink: `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/${withdrawal.id}`,
+                    note: ""
+                });
+
+                await sendEmail({
+                    to: process.env.ADMIN_EMAIL || "abdullahimohammed3108@gmail.com",
+                    subject: `Withdrawal Processed - ${profile?.full_name || 'Requester'} - ${reference}`,
+                    html: adminHtml,
+                    text: `Withdrawal ${reference} of ${withdrawal.amount} ${withdrawal.currency || 'NGN'} has been processed for ${profile?.full_name || 'user'}.`
+                });
+                console.log("✅ Withdrawal processed email sent to admin");
+            } catch (adminMailErr) {
+                console.error("Failed sending processed email to admin:", adminMailErr?.message || adminMailErr);
+            }
+        } catch (err) {
+            console.error("Unexpected error sending withdrawal processed emails:", err?.message || err);
+        }
+    })();
 
     return res.status(200).json({ success: true, message: "Withdrawal approved and wallet updated successfully" });
 };
