@@ -12,6 +12,8 @@ import {
     withdrawalRequestTemplate,
     notificationTemplate
 } from '../templates/emailTemplates.js';
+import { paymentInitializeTemplate } from '../templates/paymentInitialize.js';
+import { paymentConfirmationTemplate } from '../templates/paymentConfirmation.js';
 
 // Send welcome email
 export const sendWelcomeEmail = async (userEmail, userName) => {
@@ -138,6 +140,79 @@ export const sendWithdrawalRequestEmail = async (userEmail, userName, amount, st
     return await sendEmail({
         to: userEmail,
         subject: `Withdrawal Request ${status === 'approved' ? 'Approved' : 'Received'} - Kolekto`,
+        html,
+        text
+    });
+};
+
+// Send payment initialization email
+export const sendPaymentInitialize = async (
+    payerEmail,
+    payerName,
+    collectionTitle,
+    amount,
+    currency,
+    authorizationUrl,
+    transactionRef,
+    participants = [],
+    createdAt
+) => {
+    const html = paymentInitializeTemplate({
+        payerName,
+        payerEmail,
+        collectionTitle,
+        amount,
+        currency: currency || 'NGN',
+        authorizationUrl,
+        transactionRef,
+        participants,
+        createdAt: createdAt || new Date().toISOString()
+    });
+
+    const text = `Payment initialized for ${collectionTitle}. Amount: ${amount}. Click here to complete: ${authorizationUrl}`;
+
+    return await sendEmail({
+        to: payerEmail,
+        subject: `Payment Initialization - ${collectionTitle}`,
+        html,
+        text
+    });
+};
+
+// Send payment confirmation email
+export const sendPaymentConfirmation = async (
+    payerEmail,
+    payerName,
+    collectionTitle,
+    amount,
+    currency,
+    transactionRef,
+    paidAt,
+    channel,
+    participants = [],
+    receiptUrl,
+    organizerName
+) => {
+    const html = paymentConfirmationTemplate({
+        payerName,
+        payerEmail,
+        collectionTitle,
+        amount,
+        currency: currency || 'NGN',
+        transactionRef,
+        status: 'success',
+        paidAt: paidAt || new Date().toISOString(),
+        channel: channel || 'card',
+        participants,
+        receiptUrl,
+        organizerName
+    });
+
+    const text = `Payment confirmed for ${collectionTitle}. Amount: ${amount}. Reference: ${transactionRef}`;
+
+    return await sendEmail({
+        to: payerEmail,
+        subject: `Payment Confirmation - ${collectionTitle}`,
         html,
         text
     });
