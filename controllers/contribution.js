@@ -229,6 +229,7 @@ export const createContribution = async (req, res) => {
             parsedAmount = parseFloat(amount + (amount * 0.025)); // minimum ₦100
 
         }
+        console.log(parsedAmount, 'parsd amo');
 
         // Insert contributor
         const { data: contributorData, error: contributorError } = await supabase
