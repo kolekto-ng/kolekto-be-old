@@ -664,8 +664,8 @@ export const handleWebhook = async (req, res) => {
     const event = req.body;
 
     if (event.event === "charge.success") {
-        const reference = event.data.
-            console.log("Processing charge.success for rereference;ference:", reference);
+        const reference = event.data.reference
+        console.log("Processing charge.success for rereference;ference:", reference);
 
         const { data: deposit, error: depositError } = await supabase
             .from("deposits")
