@@ -305,6 +305,7 @@ export const verifyPayment = async (req, res) => {
     if (fetchError || !existingDeposit) {
         return res.status(404).json({ error: "Deposit not found" });
     }
+    console.log(existingDeposit, 'outside');
 
     // If already successful, do not verify again
     if (existingDeposit.status === "success") {
@@ -312,6 +313,7 @@ export const verifyPayment = async (req, res) => {
             supabase.from("contributions").select("*").eq("id", existingDeposit.contributor_id).single(),
             supabase.from("collections").select("*").eq("id", existingDeposit.collection_id).single()
         ]);
+        console.log('already verified', existingDeposit);
 
         const participants = [
             {
@@ -413,6 +415,7 @@ export const verifyPayment = async (req, res) => {
         if (depositError) {
             return res.status(500).json({ error: depositError.message });
         }
+        console.log(paystackData, 'paystacj data');
 
         if (deposit && deposit.contributor_id && paystackData.status === "success") {
             if (deposit.collection_id && deposit.amount > 0) {
@@ -420,19 +423,23 @@ export const verifyPayment = async (req, res) => {
                 await updateWalletStats(deposit.collection_id, deposit.amount);
             }
 
+            // Fetch the collection to check for code_prefix
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix, title, organizer_id")
+                .select("code_prefix, title, collection_id")
                 .eq("id", deposit.collection_id)
                 .single();
 
-            const { count } = await supabase
+            // Fetch the number of contributors for this collection
+            const { count, error: countError } = await supabase
                 .from("contributions")
                 .select("id", { count: "exact", head: true })
                 .eq("collection_id", deposit.collection_id)
                 .eq("status", "paid");
+            console.log(collection, '---col');
 
             if (collection && collection.code_prefix) {
+                // Generate next sequence number, padded to 3 digits
                 const nextNumber = String((count || 0) + 1).padStart(3, '0');
                 const uniqueCode = `${collection.code_prefix}_${nextNumber}`;
                 await supabase
@@ -657,14 +664,15 @@ export const handleWebhook = async (req, res) => {
     const event = req.body;
 
     if (event.event === "charge.success") {
-        const reference = event.data.reference;
-        console.log("Processing charge.success for reference:", reference);
+        const reference = event.data.reference
+        console.log("Processing charge.success for rereference;ference:", reference);
 
         const { data: deposit, error: depositError } = await supabase
             .from("deposits")
             .select("*")
             .eq("payment_reference", reference)
             .single();
+        console.log(deposit, 'webhook depo');
 
         if (depositError || !deposit) {
             console.error("Deposit not found:", reference);
@@ -690,7 +698,7 @@ export const handleWebhook = async (req, res) => {
         if (deposit.contributor_id) {
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix, title, organizer_id")
+                .select("code_prefix, title, collection_id")
                 .eq("id", deposit.collection_id)
                 .single();
 
@@ -700,6 +708,7 @@ export const handleWebhook = async (req, res) => {
                 .eq("collection_id", deposit.collection_id)
                 .eq("status", "paid");
 
+            console.log(collection, '---col');
             if (collection && collection.code_prefix) {
                 const nextNumber = String((count || 0) + 1).padStart(3, "0");
                 const uniqueCode = `${collection.code_prefix}_${nextNumber}`;
