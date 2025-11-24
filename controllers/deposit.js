@@ -426,7 +426,7 @@ export const verifyPayment = async (req, res) => {
             // Fetch the collection to check for code_prefix
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix, title, collection_id")
+                .select("code_prefix")
                 .eq("id", deposit.collection_id)
                 .single();
 
@@ -698,7 +698,7 @@ export const handleWebhook = async (req, res) => {
         if (deposit.contributor_id) {
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix, title, collection_id")
+                .select("code_prefix")
                 .eq("id", deposit.collection_id)
                 .single();
 
