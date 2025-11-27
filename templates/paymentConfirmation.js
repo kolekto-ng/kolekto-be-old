@@ -1,52 +1,52 @@
 export const paymentConfirmationTemplate = ({
-    payerName,
-    payerEmail,
-    collectionTitle,
-    amount,
-    currency = 'NGN',
-    transactionRef,
-    status = 'success',
-    paidAt,
-    channel = 'card',
-    participants = [],
-    receiptUrl,
-    organizerName = 'Collection Organizer'
+  payerName,
+  payerEmail,
+  collectionTitle,
+  amount,
+  currency = 'NGN',
+  transactionRef,
+  status = 'success',
+  paidAt,
+  channel = 'card',
+  participants = [],
+  receiptUrl,
+  organizerName = 'Collection Organizer'
 }) => {
-    const formatDate = (date) => {
-        return new Date(date).toLocaleString('en-NG', {
-            day: 'numeric',
-            month: 'long',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit'
-        });
-    };
+  const formatDate = (date) => {
+    return new Date(date).toLocaleString('en-NG', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  };
 
-    const formatTime = (date) => {
-        return new Date(date).toLocaleTimeString('en-NG', {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit'
-        });
-    };
+  const formatTime = (date) => {
+    return new Date(date).toLocaleTimeString('en-NG', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  };
 
-    const formatCurrency = (value) => {
-        return new Intl.NumberFormat('en-NG', {
-            style: 'currency',
-            currency: currency,
-            minimumFractionDigits: 2
-        }).format(value);
-    };
+  const formatCurrency = (value) => {
+    return new Intl.NumberFormat('en-NG', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 2
+    }).format(value);
+  };
 
-    // Generate receipt URL from transaction reference
-    const dynamicReceiptUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/payment/verify?trxref=${transactionRef}&reference=${transactionRef}`;
-    const finalReceiptUrl = dynamicReceiptUrl;
+  // Generate receipt URL from transaction reference
+  const dynamicReceiptUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/payment/verify?trxref=${transactionRef}&reference=${transactionRef}`;
+  const finalReceiptUrl = dynamicReceiptUrl;
 
-    const participantDetails = participants
-        .map((p) => {
-            const details = p.details || [];
-            return `
+  const participantDetails = participants
+    .map((p) => {
+      const details = p.details || [];
+      return `
         <tr>
           <td colspan="2" style="padding: 15px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
             <div style="margin: 0 0 12px 0;">
@@ -66,10 +66,10 @@ export const paymentConfirmationTemplate = ({
           </td>
         </tr>
       `;
-        })
-        .join('');
+    })
+    .join('');
 
-    return `
+  return `
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -178,7 +178,7 @@ export const paymentConfirmationTemplate = ({
               <li>Please keep this email for your records</li>
               <li>Your payment confirmation has been sent to the collection organizer</li>
               <li>Transaction reference: <strong>${transactionRef}</strong></li>
-              <li>For inquiries, contact us at <a href="mailto:support@kolekto.com.ng" style="color: #28a745; text-decoration: none;">support@kolekto.com.ng</a></li>
+              <li>For inquiries, contact us at <a href="mailto:team@kolekto.com.ng" style="color: #28a745; text-decoration: none;">team@kolekto.com.ng</a></li>
             </ul>
           </div>
 
@@ -194,7 +194,7 @@ export const paymentConfirmationTemplate = ({
           <p style="color: #6c757d; font-size: 12px; text-align: center; margin: 0;">
             © 2025 Kolekto Limited. All rights reserved.<br>
             <a href="https://kolekto.com.ng" style="color: #28a745; text-decoration: none;">Visit our website</a> | 
-            <a href="mailto:support@kolekto.com.ng" style="color: #28a745; text-decoration: none;">Contact Support</a>
+            <a href="mailto:team@kolekto.com.ng" style="color: #28a745; text-decoration: none;">Contact Support</a>
           </p>
         </div>
       </div>

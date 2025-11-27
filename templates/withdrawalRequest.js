@@ -1,32 +1,32 @@
 export const withdrawalRequestTemplate = ({
-    userName,
-    amount,
-    currency = "NGN",
-    withdrawalId,
-    status = "received",
-    expectedProcessingDays = 1,
-    accountName,
-    accountNumber,
-    bankName,
-    submittedAt = new Date().toISOString(),
-    dashboardUrl = process.env.FRONTEND_URL || "https://www.kolekto.com.ng",
-    supportEmail = "support@kolekto.com.ng"
+  userName,
+  amount,
+  currency = "NGN",
+  withdrawalId,
+  status = "received",
+  expectedProcessingDays = 1,
+  accountName,
+  accountNumber,
+  bankName,
+  submittedAt = new Date().toISOString(),
+  dashboardUrl = process.env.FRONTEND_URL || "https://www.kolekto.com.ng",
+  supportEmail = "team@kolekto.com.ng"
 }) => {
-    const formatDate = (d) =>
-        new Date(d).toLocaleString("en-NG", {
-            day: "numeric",
-            month: "long",
-            year: "numeric",
-            hour: "2-digit",
-            minute: "2-digit"
-        });
+  const formatDate = (d) =>
+    new Date(d).toLocaleString("en-NG", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
 
-    const formatCurrency = (v) =>
-        new Intl.NumberFormat("en-NG", { style: "currency", currency }).format(v);
+  const formatCurrency = (v) =>
+    new Intl.NumberFormat("en-NG", { style: "currency", currency }).format(v);
 
-    const statusLabel = status === "approved" ? "Approved" : status === "processing" ? "Processing" : "Received";
+  const statusLabel = status === "approved" ? "Approved" : status === "processing" ? "Processing" : "Received";
 
-    const detailsRows = `
+  const detailsRows = `
     <tr>
       <td style="padding:8px 0; color:#6b7280; font-weight:600; width:45%;">Withdrawal ID</td>
       <td style="padding:8px 0; color:#111827; font-weight:700;">${withdrawalId || "N/A"}</td>
@@ -53,7 +53,7 @@ export const withdrawalRequestTemplate = ({
     </tr>
   `;
 
-    return `
+  return `
   <!doctype html>
   <html lang="en">
   <head>

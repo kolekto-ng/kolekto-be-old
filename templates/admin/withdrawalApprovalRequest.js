@@ -1,31 +1,31 @@
 export const withdrawalApprovalRequestTemplate = ({
-    adminName = "Admin",
-    userName,
-    amount,
-    currency = "NGN",
-    withdrawalId,
-    accountName,
-    accountNumber,
-    bankName,
-    submittedAt = new Date().toISOString(),
-    approveUrl,
-    declineUrl,
-    dashboardUrl = process.env.FRONTEND_URL || "https://www.kolekto.com.ng",
-    supportEmail = "support@kolekto.com.ng"
+  adminName = "Admin",
+  userName,
+  amount,
+  currency = "NGN",
+  withdrawalId,
+  accountName,
+  accountNumber,
+  bankName,
+  submittedAt = new Date().toISOString(),
+  approveUrl,
+  declineUrl,
+  dashboardUrl = process.env.FRONTEND_URL || "https://www.kolekto.com.ng",
+  supportEmail = "team@kolekto.com.ng"
 }) => {
-    const formatDate = (d) =>
-        new Date(d).toLocaleString("en-NG", {
-            day: "numeric",
-            month: "long",
-            year: "numeric",
-            hour: "2-digit",
-            minute: "2-digit"
-        });
+  const formatDate = (d) =>
+    new Date(d).toLocaleString("en-NG", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
 
-    const formatCurrency = (v) =>
-        new Intl.NumberFormat("en-NG", { style: "currency", currency }).format(v);
+  const formatCurrency = (v) =>
+    new Intl.NumberFormat("en-NG", { style: "currency", currency }).format(v);
 
-    return `
+  return `
   <!doctype html>
   <html lang="en">
   <head>
