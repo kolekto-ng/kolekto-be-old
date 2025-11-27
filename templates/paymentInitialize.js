@@ -1,36 +1,36 @@
 export const paymentInitializeTemplate = ({
-    payerName,
-    payerEmail,
-    collectionTitle,
-    amount,
-    currency = 'NGN',
-    authorizationUrl,
-    transactionRef,
-    participants = [],
-    createdAt
+  payerName,
+  payerEmail,
+  collectionTitle,
+  amount,
+  currency = 'NGN',
+  authorizationUrl,
+  transactionRef,
+  participants = [],
+  createdAt
 }) => {
-    const formatDate = (date) => {
-        return new Date(date).toLocaleString('en-NG', {
-            day: 'numeric',
-            month: 'long',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
-    };
+  const formatDate = (date) => {
+    return new Date(date).toLocaleString('en-NG', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
 
-    const formatCurrency = (value) => {
-        return new Intl.NumberFormat('en-NG', {
-            style: 'currency',
-            currency: currency,
-            minimumFractionDigits: 2
-        }).format(value);
-    };
+  const formatCurrency = (value) => {
+    return new Intl.NumberFormat('en-NG', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 2
+    }).format(value);
+  };
 
-    const participantDetails = participants
-        .map((p) => {
-            const details = p.details || [];
-            return `
+  const participantDetails = participants
+    .map((p) => {
+      const details = p.details || [];
+      return `
         <tr>
           <td colspan="2" style="padding: 15px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
             <div style="margin: 0 0 10px 0;">
@@ -50,10 +50,10 @@ export const paymentInitializeTemplate = ({
           </td>
         </tr>
       `;
-        })
-        .join('');
+    })
+    .join('');
 
-    return `
+  return `
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -161,7 +161,7 @@ export const paymentInitializeTemplate = ({
 
           <!-- Support Info -->
           <p style="color: #4a5568; font-size: 13px; line-height: 1.6; text-align: center; margin: 0 0 15px 0;">
-            Need help? Contact our support team at <a href="mailto:support@kolekto.com.ng" style="color: #28a745; text-decoration: none; font-weight: bold;">support@kolekto.com.ng</a>
+            Need help? Contact our support team at <a href="mailto:team@kolekto.com.ng" style="color: #28a745; text-decoration: none; font-weight: bold;">team@kolekto.com.ng</a>
           </p>
 
           <!-- Footer -->

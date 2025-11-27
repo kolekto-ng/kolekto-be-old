@@ -1,42 +1,42 @@
 export const withdrawalApprovedTemplate = ({
-    userName,
-    amount,
-    currency = "NGN",
-    withdrawalId,
-    processedAt = new Date().toISOString(),
-    status = "Processed",
-    accountName,
-    accountNumber,
-    bankName,
-    reference, // document number / transfer reference
-    currentBalance,
-    availableBalance,
-    dashboardUrl = process.env.FRONTEND_URL || "https://www.kolekto.com.ng",
-    supportEmail = "support@kolekto.com.ng"
+  userName,
+  amount,
+  currency = "NGN",
+  withdrawalId,
+  processedAt = new Date().toISOString(),
+  status = "Processed",
+  accountName,
+  accountNumber,
+  bankName,
+  reference, // document number / transfer reference
+  currentBalance,
+  availableBalance,
+  dashboardUrl = process.env.FRONTEND_URL || "https://www.kolekto.com.ng",
+  supportEmail = "team@kolekto.com.ng"
 }) => {
-    const formatDate = (d) =>
-        new Date(d).toLocaleString("en-NG", {
-            day: "numeric",
-            month: "long",
-            year: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit"
-        });
+  const formatDate = (d) =>
+    new Date(d).toLocaleString("en-NG", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
 
-    const formatCurr = (v) =>
-        new Intl.NumberFormat("en-NG", { style: "currency", currency }).format(v || 0);
+  const formatCurr = (v) =>
+    new Intl.NumberFormat("en-NG", { style: "currency", currency }).format(v || 0);
 
-    const maskAccount = (num) => {
-        if (!num) return "N/A";
-        const s = String(num);
-        if (s.length <= 4) return "****" + s;
-        return "******" + s.slice(-4);
-    };
+  const maskAccount = (num) => {
+    if (!num) return "N/A";
+    const s = String(num);
+    if (s.length <= 4) return "****" + s;
+    return "******" + s.slice(-4);
+  };
 
-    const receiptUrl = `${dashboardUrl}/wallet/withdrawals/${withdrawalId}`;
+  const receiptUrl = `${dashboardUrl}/wallet/withdrawals/${withdrawalId}`;
 
-    return `
+  return `
   <!doctype html>
   <html lang="en">
   <head>
