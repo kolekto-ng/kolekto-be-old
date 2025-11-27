@@ -14,23 +14,23 @@ const generateSlug = (title) => {
 const ensureUniqueSlug = async (baseSlug) => {
     let slug = baseSlug;
     let counter = 1;
-    
+
     while (true) {
         const { data, error } = await supabase
             .from('collections')
             .select('id')
             .eq('slug', slug)
             .single();
-        
+
         // If no record found, slug is unique
         if (error && error.code === 'PGRST116') {
             return slug;
         }
-        
+
         // If record exists, append counter
         slug = `${baseSlug}-${counter}`;
         counter++;
-        
+
         // Safety check to prevent infinite loop
         if (counter > 1000) {
             return `${baseSlug}-${Date.now()}`;
@@ -65,17 +65,17 @@ export const createCollection = async (req, res) => {
     let parsedAmount = null;
 
     if (collection_type && !["fixed", "tiered", "fundraising"].includes(collection_type)) {
-        return res.status(400).json({ error: "Collection type must be either 'fixed' or 'tiered'" });
+        return res.status(400).json({ message: "Collection type must be either 'fixed' or 'tiered'" });
     }
 
-    if (collection_type === "fundraising" && (!target_amount || isNaN(parseFloat(target_amount)) || parseFloat(target_amount) <= 0)) {
-        return res.status(400).json({ error: "Target amount must be a positive number for fundraising collections" });
-    }
+    // if (collection_type === "fundraising" && (!target_amount || isNaN(parseFloat(target_amount)) || parseFloat(target_amount) <= 0)) {
+    //     return res.status(400).json({ message: "Target amount must be a positive number for fundraising collections" });
+    // }
     let amountBreakdown = {};
 
     if (collection_type === "fundraising") {
         if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
-            return res.status(400).json({ error: "Amount must be greater than ₦100 for fundraising collections" });
+            return res.status(400).json({ message: "Amount must be greater than ₦100 for fundraising collections" });
         }
         collectionType = "fundraising"; // fundraising uses fixed amount per contribution
         fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
@@ -92,12 +92,12 @@ export const createCollection = async (req, res) => {
 
 
     if (!title) {
-        return res.status(400).json({ error: "Title is required" });
+        return res.status(400).json({ message: "Title is required" });
     }
 
     if (collection_type !== "fundraising") {
         if (!deadline || isNaN(Date.parse(deadline)) || new Date(deadline) <= new Date()) {
-            return res.status(400).json({ error: "Deadline must be a valid future date" });
+            return res.status(400).json({ message: "Deadline must be a valid future date" });
         }
     }
 
@@ -135,12 +135,12 @@ export const createCollection = async (req, res) => {
     } else {
         // fixed collection
         if (!amount) {
-            return res.status(400).json({ error: "Amount is required for fixed collections" });
+            return res.status(400).json({ message: "Amount is required for fixed collections" });
         }
 
         parsedAmount = parseFloat(amount);
         if (isNaN(parsedAmount) || parsedAmount <= 100) {
-            return res.status(400).json({ error: "Amount must be greater than ₦100" });
+            return res.status(400).json({ message: "Amount must be greater than ₦100" });
         }
     }
 
@@ -200,7 +200,7 @@ export const createCollection = async (req, res) => {
 
     if (collection_type === "fundraising") {
         if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
-            return res.status(400).json({ error: "Amount must be greater than ₦100 for fundraising collections" });
+            return res.status(400).json({ message: "Amount must be greater than ₦100 for fundraising collections" });
         }
         collectionType = "fundraising"; // fundraising uses fixed amount per contribution
         fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
