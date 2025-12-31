@@ -58,7 +58,7 @@ app.use("/api/settings/kyc", kycRouter);
 app.use("/api/landing-page", landingPageRouter);
 app.use("/api/adminurlabdkole", adminRouter);
 
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 3000;
 
 app.set('trust proxy', true);
 
@@ -72,7 +72,7 @@ const initializeEmailService = async () => {
     }
 };
 
-app.listen(port, async () => {
+app.listen(port, '0.0.0.0', async () => {
     console.log(`Server Running on port ${port}`);
     // Initialize email service on startup
     await initializeEmailService();
