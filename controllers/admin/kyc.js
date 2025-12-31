@@ -676,56 +676,56 @@ export const approveDocument = async (req, res) => {
             console.error("Failed to log history:", histError);
         }
 
-    // 6) Manually update kyc_verifications table based on document approval
-    // Check if all documents of this type are now verified
-    const { data: allDocumentsOfType, error: docsError } = await supabase
-      .from("kyc_documents")
-      .select("id, status")
-      .eq("user_id", document.user_id)
-      .eq("document_type", document.document_type);
+        // 6) Manually update kyc_verifications table based on document approval
+        // Check if all documents of this type are now verified
+        const { data: allDocumentsOfType, error: docsError } = await supabase
+            .from("kyc_documents")
+            .select("id, status")
+            .eq("user_id", document.user_id)
+            .eq("document_type", document.document_type);
 
-    if (!docsError && allDocumentsOfType && allDocumentsOfType.length > 0) {
-      // Check if all documents of this type are verified
-      const allVerified = allDocumentsOfType.every(doc => doc.status === "verified");
-      
-      // Map document_type to verification flag
-      const verificationFlagMap = {
-        'identity': 'identity_verified',
-        'address': 'address_verified',
-        'bank': 'bank_verified',
-        'bvn': 'bvn_verified'
-      };
+        if (!docsError && allDocumentsOfType && allDocumentsOfType.length > 0) {
+            // Check if all documents of this type are verified
+            const allVerified = allDocumentsOfType.every(doc => doc.status === "verified");
 
-      const flagName = verificationFlagMap[document.document_type];
-      
-      if (flagName) {
-        // Update the verification flag in kyc_verifications
-        const { error: updateKycError } = await supabase
-          .from("kyc_verifications")
-          .update({ 
-            [flagName]: allVerified,
-            updated_at: new Date().toISOString()
-          })
-          .eq("user_id", document.user_id);
+            // Map document_type to verification flag
+            const verificationFlagMap = {
+                'identity': 'identity_verified',
+                'address': 'address_verified',
+                'bank': 'bank_verified',
+                'bvn': 'bvn_verified'
+            };
 
-        if (updateKycError) {
-          console.error("Failed to update KYC verification flag:", updateKycError);
-        } else {
-          // Update overall status
-          await updateKycOverallStatus(document.user_id);
+            const flagName = verificationFlagMap[document.document_type];
+
+            if (flagName) {
+                // Update the verification flag in kyc_verifications
+                const { error: updateKycError } = await supabase
+                    .from("kyc_verifications")
+                    .update({
+                        [flagName]: allVerified,
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq("user_id", document.user_id);
+
+                if (updateKycError) {
+                    console.error("Failed to update KYC verification flag:", updateKycError);
+                } else {
+                    // Update overall status
+                    await updateKycOverallStatus(document.user_id);
+                }
+            }
         }
-      }
-    }
 
-    return res.status(200).json({ 
-      message: `${document.document_type} document approved successfully`, 
-      document: updatedDocument,
-      document_type: document.document_type
-    });
-  } catch (err) {
-    console.error("Error approving document:", err);
-    return res.status(500).json({ error: "Unexpected error approving document", details: err.message });
-  }
+        return res.status(200).json({
+            message: `${document.document_type} document approved successfully`,
+            document: updatedDocument,
+            document_type: document.document_type
+        });
+    } catch (err) {
+        console.error("Error approving document:", err);
+        return res.status(500).json({ error: "Unexpected error approving document", details: err.message });
+    }
 };
 
 // POST /api/admin/kyc-documents/:documentId/reject
@@ -812,56 +812,56 @@ export const rejectDocument = async (req, res) => {
             console.error("Failed to log history:", histError);
         }
 
-    // 6) Manually update kyc_verifications table based on document rejection
-    // Check if all documents of this type are still verified
-    const { data: allDocumentsOfType, error: docsError } = await supabase
-      .from("kyc_documents")
-      .select("id, status")
-      .eq("user_id", document.user_id)
-      .eq("document_type", document.document_type);
+        // 6) Manually update kyc_verifications table based on document rejection
+        // Check if all documents of this type are still verified
+        const { data: allDocumentsOfType, error: docsError } = await supabase
+            .from("kyc_documents")
+            .select("id, status")
+            .eq("user_id", document.user_id)
+            .eq("document_type", document.document_type);
 
-    if (!docsError && allDocumentsOfType && allDocumentsOfType.length > 0) {
-      // Check if all documents of this type are verified
-      const allVerified = allDocumentsOfType.every(doc => doc.status === "verified");
-      
-      // Map document_type to verification flag
-      const verificationFlagMap = {
-        'identity': 'identity_verified',
-        'address': 'address_verified',
-        'bank': 'bank_verified',
-        'bvn': 'bvn_verified'
-      };
+        if (!docsError && allDocumentsOfType && allDocumentsOfType.length > 0) {
+            // Check if all documents of this type are verified
+            const allVerified = allDocumentsOfType.every(doc => doc.status === "verified");
 
-      const flagName = verificationFlagMap[document.document_type];
-      
-      if (flagName) {
-        // Update the verification flag in kyc_verifications
-        const { error: updateKycError } = await supabase
-          .from("kyc_verifications")
-          .update({ 
-            [flagName]: allVerified,
-            updated_at: new Date().toISOString()
-          })
-          .eq("user_id", document.user_id);
+            // Map document_type to verification flag
+            const verificationFlagMap = {
+                'identity': 'identity_verified',
+                'address': 'address_verified',
+                'bank': 'bank_verified',
+                'bvn': 'bvn_verified'
+            };
 
-        if (updateKycError) {
-          console.error("Failed to update KYC verification flag:", updateKycError);
-        } else {
-          // Update overall status
-          await updateKycOverallStatus(document.user_id);
+            const flagName = verificationFlagMap[document.document_type];
+
+            if (flagName) {
+                // Update the verification flag in kyc_verifications
+                const { error: updateKycError } = await supabase
+                    .from("kyc_verifications")
+                    .update({
+                        [flagName]: allVerified,
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq("user_id", document.user_id);
+
+                if (updateKycError) {
+                    console.error("Failed to update KYC verification flag:", updateKycError);
+                } else {
+                    // Update overall status
+                    await updateKycOverallStatus(document.user_id);
+                }
+            }
         }
-      }
-    }
 
-    return res.status(200).json({ 
-      message: `${document.document_type} document rejected`, 
-      document: updatedDocument,
-      document_type: document.document_type
-    });
-  } catch (err) {
-    console.error("Error rejecting document:", err);
-    return res.status(500).json({ error: "Unexpected error rejecting document", details: err.message });
-  }
+        return res.status(200).json({
+            message: `${document.document_type} document rejected`,
+            document: updatedDocument,
+            document_type: document.document_type
+        });
+    } catch (err) {
+        console.error("Error rejecting document:", err);
+        return res.status(500).json({ error: "Unexpected error rejecting document", details: err.message });
+    }
 };
 
 // POST /api/admin/kyc-verifications/:id/add-note
