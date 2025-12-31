@@ -250,7 +250,7 @@ export const initializePayment = async (req, res) => {
 
             console.log("✅ Payment initialization email sent");
         } catch (err) {
-            console.error("Email send error:", err?.message || err);
+            throw new Error(`Email send error: ${err?.message || err}`);
         }
 
         res.status(200).json({
@@ -266,12 +266,12 @@ export const initializePayment = async (req, res) => {
                     .update({ payment_id: payment.id })
                     .eq("id", contributorId);
             } catch (err) {
-                console.error("Background update failed:", err.message);
+                throw new Error(`Background update failed: ${err.message}`);
             }
         })();
 
     } catch (error) {
-        console.error("Error in initializePayment:", error);
+        throw new Error(`Error in initializePayment: ${error.message}`);
         return res.status(500).json({
             error: error.response?.data?.message || error.message,
         });
@@ -375,11 +375,11 @@ export const verifyPayment = async (req, res) => {
                     );
                     console.log("✅ Payment confirmation email sent (existing payment)");
                 } catch (mailErr) {
-                    console.error("Contributor email send error:", mailErr?.message || mailErr);
+                    throw new Error(`Contributor email send error: ${mailErr?.message || mailErr}`);
                 }
             }
         } catch (e) {
-            console.error("Contributor confirmation update error:", e?.message || e);
+            throw new Error(`Contributor confirmation update error: ${e?.message || e}`);
         }
 
         return res.status(200).json({
@@ -506,7 +506,7 @@ export const verifyPayment = async (req, res) => {
                         );
                         console.log("✅ Payment confirmation email sent to contributor");
                     } catch (mailErr) {
-                        console.error("Contributor email send error:", mailErr?.message || mailErr);
+                        throw new Error(`Contributor email send error: ${mailErr?.message || mailErr}`);
                     }
                 }
             } catch (e) {
@@ -544,7 +544,7 @@ export const verifyPayment = async (req, res) => {
                         });
                         console.log("✅ Organizer notification sent to organizer");
                     } catch (mailErr) {
-                        console.error("Organizer email send error:", mailErr?.message || mailErr);
+                        throw new Error(`Organizer email send error: ${mailErr?.message || mailErr}`);
                     }
                 }
             } catch (e) {
@@ -675,7 +675,7 @@ export const handleWebhook = async (req, res) => {
         console.log(deposit, 'webhook depo');
 
         if (depositError || !deposit) {
-            console.error("Deposit not found:", reference);
+            throw new Error(`Deposit not found: ${reference}`);
             return res.status(200).send("Deposit not found");
         }
 
@@ -784,13 +784,13 @@ export const handleWebhook = async (req, res) => {
                         receiptUrl,
                         collection?.title
                     );
-                    console.log("✅ Payment confirmation email sent via webhook");
+                    console.log("✅ Contributor confirmation email sent via webhook");
                 } catch (mailErr) {
-                    console.error("Contributor email send error:", mailErr?.message || mailErr);
+                    throw new Error(`Contributor email send error: ${mailErr?.message || mailErr}`);
                 }
             }
         } catch (e) {
-            console.error("Contributor confirmation update error:", e?.message || e);
+            throw new Error(`Contributor confirmation update error: ${e?.message || e}`);
         }
 
         // --- Notify organizer exactly once ---
@@ -824,11 +824,11 @@ export const handleWebhook = async (req, res) => {
                     });
                     console.log("✅ Organizer notification sent via webhook");
                 } catch (mailErr) {
-                    console.error("Organizer email send error:", mailErr?.message || mailErr);
+                    throw new Error(`Organizer email send error: ${mailErr?.message || mailErr}`);
                 }
             }
         } catch (e) {
-            console.error("Organizer notification update error:", e?.message || e);
+            throw new Error(`Organizer notification update error: ${e?.message || e}`);
         }
 
         console.log(`✅ Deposit confirmed | Collection: ${deposit.collection_id} | ₦${deposit.amount}`);

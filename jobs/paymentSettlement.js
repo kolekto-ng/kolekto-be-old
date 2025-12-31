@@ -14,7 +14,7 @@ async function runDailySettlement() {
     console.log("Running T+1 settlements...");
     const { error } = await supabase.rpc("process_pending_deposits");
     if (error) {
-        console.error("Settlement error:", error);
+        throw new Error(`Settlement error: ${JSON.stringify(error)}`);
     } else {
         console.log("Settlements completed successfully at", new Date());
     }

@@ -262,7 +262,7 @@ export const createContribution = async (req, res) => {
         }
 
     } catch (error) {
-        console.error("Error in createContribution:", error);
+        throw new Error(`Error in createContribution: ${error.message}`);
         res.status(500).json({
             success: false,
             message: error.message || "Internal server error",

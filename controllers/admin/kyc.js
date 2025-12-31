@@ -223,7 +223,7 @@ export const getSingleKycVerification = async (req, res) => {
                             .createSignedUrl(file.file_path, 60 * 60); // 1 hour expiry
                         console.log(signedUrlData)
                         if (signedUrlError) {
-                            console.error("Error generating signed URL:", signedUrlError);
+                            throw new Error(`Error generating signed URL: ${signedUrlError.message}`);
                             return { ...file, signed_url: null };
                         }
 
@@ -343,7 +343,7 @@ export const getSingleKycVerification = async (req, res) => {
         });
 
     } catch (err) {
-        console.error("Error fetching KYC details:", err);
+        throw new Error(`Error fetching KYC details: ${err.message}`);
         return res.status(500).json({
             message: "Failed to fetch KYC details",
             details: err.message
@@ -424,7 +424,7 @@ export const approveKyc = async (req, res) => {
         // 4) Update overall status if all verifications are complete
         const statusUpdate = await updateKycOverallStatus(updatedKyc.user_id);
         if (statusUpdate.error) {
-            console.error("Failed to update overall status:", statusUpdate.error);
+            throw new Error(`Failed to update overall status: ${statusUpdate.error.message}`);
         }
 
         // 5) Fetch admin profile to log admin_name

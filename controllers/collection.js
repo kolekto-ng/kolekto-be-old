@@ -297,7 +297,7 @@ export const createCollection = async (req, res) => {
 
         return res.status(201).json({ collection });
     } catch (error) {
-        console.error("Error creating collection:", error);
+        throw new Error(`Error creating collection: ${error.message}`);
         return res
             .status(500)
             .json({ message: "Unexpected server error: " + error.message });
@@ -344,7 +344,7 @@ export const getUserCollections = async (req, res) => {
 
         return res.status(200).json({ ...formatted, data });
     } catch (err) {
-        console.error("Error fetching user collections:", err);
+        throw new Error(`Error fetching user collections: ${err.message}`);
         return res.status(500).json({ error: "Unexpected server error" });
     }
 };
@@ -390,7 +390,7 @@ export const getSingleCollection = async (req, res) => {
 
         return res.status(200).json({ collection });
     } catch (err) {
-        console.error("Error fetching collection:", err);
+        throw new Error(`Error fetching collection: ${err.message}`);
         return res.status(500).json({ error: "Unexpected server error" });
     }
 };
@@ -442,7 +442,7 @@ export const editCollection = async (req, res) => {
 
         return res.status(200).json({ collection: data });
     } catch (err) {
-        console.error("Error editing collection:", err);
+        throw new Error(`Error editing collection: ${err.message}`);
         return res.status(500).json({ error: "Unexpected server error" });
     }
 };

@@ -58,7 +58,7 @@ export const signIn = async (req, res) => {
             message: "Successfully signed in"
         });
     } catch (err) {
-        console.error('Sign in error:', err);
+        throw new Error(`Sign in error: ${err.message}`);
         return res.status(500).json({ message: "Internal server error during sign in" });
     }
 };
@@ -106,7 +106,7 @@ export const signUp = async (req, res) => {
         }
 
     } catch (err) {
-        console.error(err);
+        throw new Error(`Recaptcha verification failed: ${err.message}`);
         res.status(500).json({ message: "Verification failed" });
     }
 
@@ -145,7 +145,7 @@ export const signOut = async (req, res) => {
 
         return res.status(200).json({ message: "Signed out successfully." });
     } catch (err) {
-        console.error('Sign out error:', err);
+        throw new Error(`Sign out error: ${err.message}`);
         return res.status(500).json({ error: "Internal server error during sign out" });
     }
 };
@@ -229,7 +229,7 @@ export const verifySession = async (req, res) => {
 
         return res.status(200).json({ valid: true, user: data.user });
     } catch (err) {
-        console.error('Session verification error:', err);
+        throw new Error(`Session verification error: ${err.message}`);
         return res.status(500).json({ valid: false, error: err.message });
     }
 };
@@ -277,7 +277,7 @@ export const getCurrentUser = async (req, res) => {
             profile: profile || null
         });
     } catch (err) {
-        console.error('Get current user error:', err);
+        throw new Error(`Get current user error: ${err.message}`);
         return res.status(500).json({ error: "Internal server error" });
     }
 };
@@ -306,7 +306,7 @@ export const signInWithToken = async (req, res) => {
             message: "Successfully signed in"
         });
     } catch (err) {
-        console.error('Sign in error:', err);
+        throw new Error(`Sign in error: ${err.message}`);
         return res.status(500).json({ error: "Internal server error during sign in" });
     }
 };

@@ -9,7 +9,6 @@ export function verifyPaystackIP(req, res, next) {
     if (PAYSTACK_IPS.includes(clientIP) || LOCAL_IPS.includes(clientIP)) {
         return next();
     } else {
-        console.warn(`Blocked request from IP: ${clientIP}`);
-        return res.status(403).json({ error: 'Forbidden' });
+        throw new Error(`Blocked request from IP: ${clientIP}`);
     }
 }
