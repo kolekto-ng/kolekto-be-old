@@ -148,6 +148,53 @@ export const uploadDocument = async (req, res, next) => {
 };
 
 
+export const saveNIN = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { nin } = req.body;
+
+        if (!nin || !/^\d{11}$/.test(nin)) {
+            return res.status(400).json({ error: "NIN must be exactly 11 digits" });
+        }
+
+        // Encrypt NIN with AES-256-CBC using the same key used for account numbers
+        const ENCRYPTION_KEY = process.env.ACCOUNT_ENCRYPTION_KEY;
+        const IV_LENGTH = 16;
+        let ninCipher = null;
+        if (ENCRYPTION_KEY) {
+            const crypto = await import("node:crypto");
+            const iv = crypto.randomBytes(IV_LENGTH);
+            const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(ENCRYPTION_KEY), iv);
+            let encrypted = cipher.update(nin);
+            encrypted = Buffer.concat([encrypted, cipher.final()]);
+            ninCipher = Buffer.concat([iv, encrypted]).toString('hex');
+        }
+
+        // Hash the NIN for lookup/comparison (SHA-256)
+        const cryptoMod = await import("node:crypto");
+        const ninHash = cryptoMod.createHash("sha256").update(nin).digest("hex");
+        const ninLast4 = nin.slice(-4);
+
+        // Upsert user_identity record
+        const { error: upsertError } = await supabase
+            .from("user_identity")
+            .upsert({
+                user_id: userId,
+                nin_hash: ninHash,
+                nin_last4: ninLast4,
+                ...(ninCipher ? { nin_cipher: ninCipher } : {}),
+                updated_at: new Date().toISOString(),
+            }, { onConflict: "user_id" });
+
+        if (upsertError) throw upsertError;
+
+        return res.json({ success: true, message: "NIN saved successfully" });
+    } catch (err) {
+        console.error("saveNIN error:", err);
+        return res.status(500).json({ error: "Failed to save NIN", details: err.message });
+    }
+};
+
 export const getDocuments = async (req, res) => {
     try {
         const userId = req.user.id;

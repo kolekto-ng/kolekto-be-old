@@ -1,6 +1,6 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import authRouter from "./routes/auth.js";
 import collectorRouter from "./routes/collection.js";
@@ -14,8 +14,7 @@ import landingPageRouter from "./routes/landingPage.js";
 import adminRouter from "./routes/admin/kyc.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
-dotenv.config();
-
+import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
 const app = express();
 
 app.use(helmet());

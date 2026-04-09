@@ -4,9 +4,10 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Use service role key on backend to bypass RLS for server-side operations
 const supabase = createClient(
     process.env.SUPABASE_URL,
-    process.env.SUPABASE_ANON_KEY // Use service role key for admin access
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY
 );
 
 // Test connection

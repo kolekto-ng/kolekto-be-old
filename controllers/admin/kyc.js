@@ -13,10 +13,10 @@ const updateKycOverallStatus = async (userId) => {
             return { error: "KYC verification not found" };
         }
 
-        const { bvn_verified, bank_verified, identity_verified, address_verified } = kyc;
+        const { identity_verified, address_verified } = kyc;
 
-        // Check if all verifications are complete
-        const allVerified = bvn_verified && bank_verified && identity_verified && address_verified;
+        // Account is verified when both identity and address documents are approved
+        const allVerified = identity_verified && address_verified;
 
         let newStatus = kyc.status;
         let completedAt = kyc.completed_at;
