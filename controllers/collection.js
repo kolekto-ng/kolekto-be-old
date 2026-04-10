@@ -241,7 +241,10 @@ export const createCollection = async (req, res) => {
                     code_prefix: code_prefix || null,
                     max_contributions,
                     contributions_fields: contributions_fields || [],
-                    status: status || "active",
+                    // Fundraising campaigns require admin approval before contributors
+                    // can see or donate. Force pending_review regardless of what the
+                    // frontend sends so the collection is never accidentally made active.
+                    status: collectionType === "fundraising" ? "pending_review" : (status || "active"),
                     fee_bearer: fee_bearer || "organizer",
                     currency: currency || "NGN",
                     currency_symbol: currency_symbol || "₦",
