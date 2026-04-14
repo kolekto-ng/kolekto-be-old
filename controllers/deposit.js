@@ -406,7 +406,116 @@ export const verifyPayment = async (req, res) => {
         .single();
 
     if (fetchError || !existingDeposit) {
-        return res.status(404).json({ error: "Deposit not found" });
+        // ── Fallback: payment was initiated via Supabase Edge Function, so no
+        // deposits record exists. Verify directly with Paystack and read from
+        // the contributions table (which the edge function always writes to).
+        try {
+            const paystackRes = await axios.get(
+                `${PAYSTACK_BASE_URL}/transaction/verify/${reference}`,
+                { headers: paystackHeaders }
+            );
+            const tx = paystackRes.data.data;
+
+            const meta = (tx.metadata && typeof tx.metadata === "object") ? tx.metadata : {};
+            const collectionId = String(meta.collectionId || meta.collection_id || "").trim();
+            if (!collectionId) {
+                return res.status(404).json({ error: "Deposit not found and no collection ID in payment metadata." });
+            }
+
+            const [{ data: contribution }, { data: collection }] = await Promise.all([
+                supabase
+                    .from("contributions")
+                    .select("*")
+                    .eq("payment_reference", reference)
+                    .eq("collection_id", collectionId)
+                    .order("created_at", { ascending: true })
+                    .limit(1)
+                    .maybeSingle(),
+                supabase
+                    .from("collections")
+                    .select("*")
+                    .eq("id", collectionId)
+                    .single(),
+            ]);
+
+            if (!collection) {
+                return res.status(404).json({ error: "Collection not found for this payment." });
+            }
+
+            const fallbackNetAmount = contribution?.amount ?? roundCurrency(Number(tx.amount || 0) / 100);
+            const fallbackTotalPaid = roundCurrency(Number(tx.amount || 0) / 100);
+            const fallbackCollType = collection.collection_type || collection.type || "fixed";
+            const fallbackFeeBearer = collection.fee_bearer || "organizer";
+            const { platformFee: fbPlatformFee, gatewayFee: fbGatewayFee } =
+                calculateFees(fallbackNetAmount, fallbackCollType, fallbackFeeBearer);
+            const fallbackTotalFees = roundCurrency(fallbackTotalPaid - fallbackNetAmount);
+
+            const fallbackParticipants = contribution
+                ? [{
+                    id: contribution.id,
+                    uniqueCode: contribution.contributor_unique_code || null,
+                    details: formatDetails(contribution.contributor_information),
+                }]
+                : [];
+
+            const fallbackTicketSelections =
+                contribution?.contributor_information?.[0]?._ticketSelections || [];
+
+            const fallbackReceiptData = {
+                collectionTitle: collection.title || "",
+                collectionType: fallbackCollType,
+                description: collection.description || "",
+                campaignSummary: collection.campaign_summary || "",
+                bannerUrl: collection.banner_url || collection.banner_image || "",
+                eventDate: collection.event_date || "",
+                uniqueIdEnabled: Boolean(collection.unique_id_enabled),
+                codePrefix: collection.code_prefix || "",
+                contributionAmount: fallbackNetAmount,
+                platformFee: fbPlatformFee,
+                gatewayFee: fbGatewayFee,
+                totalFees: fallbackTotalFees > 0 ? fallbackTotalFees : 0,
+                totalPaid: fallbackTotalPaid,
+                participants: fallbackParticipants,
+                ticketSelections: fallbackTicketSelections,
+                transactionRef: String(tx.reference || reference),
+                status: String(tx.status || "success"),
+                paidAt: tx.paid_at || new Date().toISOString(),
+                channel: tx.channel || "",
+                currency: tx.currency || "NGN",
+                payer: {
+                    name: contribution?.name || String(tx.customer?.email || "").split("@")[0] || "",
+                    email: contribution?.email || String(tx.customer?.email || ""),
+                    phone: contribution?.phone || "",
+                },
+            };
+
+            // Send receipt email (non-blocking, best-effort)
+            if (tx.status === "success" && fallbackReceiptData.payer.email) {
+                sendPaymentConfirmation(
+                    fallbackReceiptData.payer.email,
+                    fallbackReceiptData.payer.name,
+                    collection.title,
+                    fallbackTotalPaid,
+                    tx.currency || "NGN",
+                    String(tx.reference || reference),
+                    tx.paid_at,
+                    tx.channel,
+                    fallbackParticipants,
+                    `${process.env.FRONTEND_URL}/payment/verify?reference=${reference}`,
+                    collection.title
+                ).catch((err) =>
+                    console.error("[verifyPayment fallback] email error:", err?.message || err)
+                );
+            }
+
+            return res.status(200).json({
+                message: "Payment verified",
+                receiptData: fallbackReceiptData,
+            });
+        } catch (fallbackErr) {
+            console.error("[verifyPayment fallback] error:", fallbackErr?.message);
+            return res.status(404).json({ error: "Deposit not found and fallback verification failed." });
+        }
     }
 
     // Already successful — return cached data and resend confirmation if needed
@@ -444,7 +553,14 @@ export const verifyPayment = async (req, res) => {
             contributor?.contributor_information?.[0]?._ticketSelections || [];
 
         const receiptData = {
-            collectionTitle: collection?.title,
+            collectionTitle: collection?.title || "",
+            collectionType: collection?.collection_type || collection?.type || "fixed",
+            description: collection?.description || "",
+            campaignSummary: collection?.campaign_summary || "",
+            bannerUrl: collection?.banner_url || collection?.banner_image || "",
+            eventDate: collection?.event_date || "",
+            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
+            codePrefix: collection?.code_prefix || "",
             contributionAmount: existingNetAmount,
             platformFee: exPlatformFee,
             gatewayFee: exGatewayFee,
@@ -709,7 +825,14 @@ export const verifyPayment = async (req, res) => {
             contributor?.contributor_information?.[0]?._ticketSelections || [];
 
         const receiptData = {
-            collectionTitle: collection?.title,
+            collectionTitle: collection?.title || "",
+            collectionType: collection?.collection_type || collection?.type || "fixed",
+            description: collection?.description || "",
+            campaignSummary: collection?.campaign_summary || "",
+            bannerUrl: collection?.banner_url || collection?.banner_image || "",
+            eventDate: collection?.event_date || "",
+            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
+            codePrefix: collection?.code_prefix || "",
             contributionAmount: verNetAmount,
             platformFee: verPlatformFee,
             gatewayFee: verGatewayFee,
@@ -1002,10 +1125,133 @@ export const handleWebhook = async (req, res) => {
     res.status(200).send("Webhook received");
 };
 
+/**
+ * POST /api/payments/send-receipt
+ *
+ * Internal endpoint called by the Supabase Edge Function after a successful
+ * payment. Sends a confirmation email to the contributor and notifies the
+ * organizer, using the existing Zoho SMTP email infrastructure.
+ *
+ * Secured by an optional x-internal-secret header
+ * (set INTERNAL_NOTIFY_SECRET in backend .env and as a Supabase secret).
+ */
+export const sendReceiptNotification = async (req, res) => {
+    // Optional simple secret header guard (prevents abuse from the public internet)
+    const internalSecret = process.env.INTERNAL_NOTIFY_SECRET;
+    if (internalSecret) {
+        const provided = req.headers["x-internal-secret"];
+        if (provided !== internalSecret) {
+            return res.status(403).json({ error: "Forbidden" });
+        }
+    }
+
+    const {
+        payerEmail,
+        payerName,
+        collectionTitle,
+        totalPaid,
+        currency = "NGN",
+        transactionRef,
+        paidAt,
+        channel = "card",
+        participants = [],
+        collectionId,
+    } = req.body || {};
+
+    if (!payerEmail || !collectionTitle || !transactionRef) {
+        return res.status(400).json({
+            error: "payerEmail, collectionTitle, and transactionRef are required",
+        });
+    }
+
+    const results = { payer: null, organizer: null };
+
+    // ── Contributor receipt email ────────────────────────────────────────────
+    try {
+        results.payer = await sendPaymentConfirmation(
+            payerEmail,
+            payerName || payerEmail.split("@")[0],
+            collectionTitle,
+            totalPaid,
+            currency,
+            transactionRef,
+            paidAt || new Date().toISOString(),
+            channel,
+            participants,
+            `${process.env.FRONTEND_URL}/payment/verify?reference=${transactionRef}`,
+            collectionTitle
+        );
+        console.log("[sendReceiptNotification] ✅ Contributor email sent to", payerEmail);
+    } catch (err) {
+        console.error("[sendReceiptNotification] ❌ Contributor email error:", err?.message);
+    }
+
+    // ── Organizer notification ───────────────────────────────────────────────
+    if (collectionId) {
+        try {
+            const { data: coll } = await supabase
+                .from("collections")
+                .select("title, user_id")
+                .eq("id", collectionId)
+                .single();
+
+            if (coll?.user_id) {
+                const { data: organizer } = await supabase
+                    .from("profiles")
+                    .select("email, full_name")
+                    .eq("id", coll.user_id)
+                    .single();
+
+                if (organizer?.email) {
+                    const amountFormatted = new Intl.NumberFormat("en-NG", {
+                        style: "currency", currency, minimumFractionDigits: 2,
+                    }).format(totalPaid || 0);
+
+                    results.organizer = await sendEmail({
+                        to: organizer.email,
+                        subject: `New Payment Received — ${collectionTitle}`,
+                        html: `
+                          <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px;">
+                            <div style="background:linear-gradient(135deg,#1B5E20,#388E3C);padding:24px;border-radius:8px 8px 0 0;text-align:center;">
+                              <h1 style="color:#fff;margin:0;font-size:20px;">New Payment Received</h1>
+                            </div>
+                            <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
+                              <p style="color:#374151;margin:0 0 16px;">Hi <strong>${organizer.full_name || "there"}</strong>,</p>
+                              <p style="color:#4b5563;margin:0 0 24px;">You have received a new payment for <strong>${collectionTitle}</strong>.</p>
+                              <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                                <tr style="border-bottom:1px solid #f3f4f6;">
+                                  <td style="padding:10px 0;color:#6b7280;">Payer</td>
+                                  <td style="padding:10px 0;color:#111827;font-weight:600;text-align:right;">${payerName || payerEmail}</td>
+                                </tr>
+                                <tr style="border-bottom:1px solid #f3f4f6;">
+                                  <td style="padding:10px 0;color:#6b7280;">Amount</td>
+                                  <td style="padding:10px 0;color:#16a34a;font-weight:700;font-size:16px;text-align:right;">${amountFormatted}</td>
+                                </tr>
+                                <tr>
+                                  <td style="padding:10px 0;color:#6b7280;">Reference</td>
+                                  <td style="padding:10px 0;color:#111827;font-family:monospace;text-align:right;">${transactionRef}</td>
+                                </tr>
+                              </table>
+                              <p style="color:#9ca3af;font-size:12px;margin:24px 0 0;text-align:center;">Kolekto · Secure group payments</p>
+                            </div>
+                          </div>`,
+                    });
+                    console.log("[sendReceiptNotification] ✅ Organizer email sent to", organizer.email);
+                }
+            }
+        } catch (err) {
+            console.error("[sendReceiptNotification] ❌ Organizer email error:", err?.message);
+        }
+    }
+
+    return res.status(200).json({ success: true, results });
+};
+
 export default {
     initializePayment,
     verifyPayment,
     listTransactions,
     fetchTransaction,
     handleWebhook,
+    sendReceiptNotification,
 };
