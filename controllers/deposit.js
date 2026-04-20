@@ -13,6 +13,95 @@ import {
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
 
+/**
+ * Validate the client-supplied contribution amount against collection settings.
+ *
+ * Returns null when the amount is valid, or an error string when it is not.
+ * The caller must reject the request if a non-null string is returned.
+ *
+ * Amount tolerance: ₦1 to absorb minor floating-point rounding differences.
+ */
+function validateContributionAmount({ collectionType, collection, netAmount, metadata }) {
+    const TOLERANCE = 1; // ₦1
+    const amount = roundCurrency(netAmount);
+
+    if (!amount || amount <= 0) {
+        return "Contribution amount must be greater than zero";
+    }
+
+    switch (collectionType) {
+        case 'fixed': {
+            const expected = roundCurrency(Number(collection.amount || 0));
+            if (Math.abs(amount - expected) > TOLERANCE) {
+                return `Invalid amount for fixed collection: expected ₦${expected}, received ₦${amount}`;
+            }
+            break;
+        }
+
+        case 'tiered': {
+            const tiers = collection.price_tiers || collection.pricing_tiers || [];
+            if (!tiers.length) break; // no tiers configured — allow any amount
+
+            const tierId = metadata?.selectedTierId;
+            const tierName = metadata?.selectedTier;
+            const qty = Math.max(1, Number(metadata?.quantity || 1));
+
+            const matchedTier = tiers.find((t) =>
+                (tierId && String(t.id) === String(tierId)) ||
+                (tierName && String(t.name) === String(tierName))
+            );
+
+            if (matchedTier) {
+                const expected = roundCurrency(Number(matchedTier.price) * qty);
+                if (Math.abs(amount - expected) > TOLERANCE) {
+                    return `Invalid amount for tiered collection: expected ₦${expected} (${qty}× ₦${matchedTier.price}), received ₦${amount}`;
+                }
+            }
+            break;
+        }
+
+        case 'ticket': {
+            const tiers = collection.price_tiers || collection.pricing_tiers || [];
+            const ticketSelections = Array.isArray(metadata?.ticketSelections)
+                ? metadata.ticketSelections
+                : [];
+
+            if (tiers.length && ticketSelections.length) {
+                let expected = 0;
+                for (const sel of ticketSelections) {
+                    const tier = tiers.find(
+                        (t) => String(t.id) === String(sel.tierId) ||
+                               String(t.name) === String(sel.tierName)
+                    );
+                    if (tier) expected += roundCurrency(Number(tier.price) * Number(sel.quantity || 1));
+                }
+                expected = roundCurrency(expected);
+                if (expected > 0 && Math.abs(amount - expected) > TOLERANCE) {
+                    return `Invalid ticket amount: expected ₦${expected}, received ₦${amount}`;
+                }
+            }
+            break;
+        }
+
+        case 'open_pool':
+        case 'fundraising': {
+            // Any positive amount is valid; enforce minimum if configured
+            const minimum = roundCurrency(
+                Number(collection.minimum_amount || collection.minimum_donation || 0)
+            );
+            if (minimum > 0 && amount < minimum - TOLERANCE) {
+                return `Minimum contribution for this collection is ₦${minimum}`;
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+
+    return null; // valid
+}
+
 const paystackHeaders = {
     Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
     "Content-Type": "application/json",
@@ -236,6 +325,33 @@ export const initializePayment = async (req, res) => {
 
         if (collectionError || !collection) {
             return res.status(404).json({ error: "Collection not found", collectionId, supabaseError: collectionError?.message });
+        }
+
+        // ── Server-side amount validation ────────────────────────────────────
+        // Recompute the expected net contribution from collection settings so
+        // that a tampered client payload cannot change what Paystack charges.
+        const collType = collection.collection_type || collection.collectionType || 'fixed';
+        const feeBearer = (isNewFormat ? body.metadata?.feeBearer : null)
+            || collection.fee_bearer
+            || 'organizer';
+
+        const amountError = validateContributionAmount({
+            collectionType: collType,
+            collection,
+            netAmount,
+            metadata: isNewFormat ? body.metadata : null,
+        });
+        if (amountError) {
+            return res.status(400).json({ error: amountError });
+        }
+
+        // Re-derive totalPayable server-side — ignore whatever the client sent
+        const { totalPayable: serverTotalPayable } = calculateFees(netAmount, collType, feeBearer);
+        totalPayable = serverTotalPayable;
+        // Keep paystackMeta in sync with server-computed values
+        if (isNewFormat) {
+            paystackMeta.totalPayable = totalPayable;
+            paystackMeta.feeBearer = feeBearer;
         }
 
         let contributorId;

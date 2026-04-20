@@ -400,6 +400,22 @@ export const getSingleCollection = async (req, res) => {
 
 export const editCollection = async (req, res) => {
     const { id } = req.params;
+    const requestingUserId = req.user?.id;
+
+    // ── Ownership check ──────────────────────────────────────────────────────
+    const { data: existing, error: ownerErr } = await supabase
+        .from('collections')
+        .select('user_id')
+        .eq('id', id)
+        .single();
+
+    if (ownerErr || !existing) {
+        return res.status(404).json({ error: 'Collection not found' });
+    }
+    if (existing.user_id !== requestingUserId) {
+        return res.status(403).json({ error: 'Forbidden: you do not own this collection' });
+    }
+
     const {
         title,
         description,
@@ -453,10 +469,24 @@ export const editCollection = async (req, res) => {
 export const updateCollectionStatus = async (req, res) => {
     const { id: collectionId } = req.params;
     const { newStatus } = req.body;
-    console.log(collectionId, newStatus);
+    const requestingUserId = req.user?.id;
 
     if (!collectionId || !newStatus) {
         return res.status(400).json({ error: "Collection ID and new status are required." });
+    }
+
+    // ── Ownership check ──────────────────────────────────────────────────────
+    const { data: existing, error: ownerErr } = await supabase
+        .from('collections')
+        .select('user_id')
+        .eq('id', collectionId)
+        .single();
+
+    if (ownerErr || !existing) {
+        return res.status(404).json({ error: 'Collection not found' });
+    }
+    if (existing.user_id !== requestingUserId) {
+        return res.status(403).json({ error: 'Forbidden: you do not own this collection' });
     }
 
     const { error } = await supabase

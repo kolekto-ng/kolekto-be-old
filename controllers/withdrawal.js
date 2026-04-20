@@ -49,8 +49,10 @@ async function refreshWallet(walletId, collectionId) {
 }
 
 export const requestWithdrawal = async (req, res) => {
+    // ── Use the authenticated user's ID — never trust the body ───────────────
+    const userId = req.user?.id;
+
     const {
-        organizer_id: userId,
         collection_id,
         amount,
         account_number: accountNumber,
@@ -61,6 +63,20 @@ export const requestWithdrawal = async (req, res) => {
 
     if (!userId || !collection_id || !amount || !accountNumber || !accountName || !userBankName) {
         return res.status(400).json({ error: "Missing required withdrawal fields" });
+    }
+
+    // ── Verify the requesting user owns this collection ──────────────────────
+    const { data: collection, error: collectionErr } = await supabase
+        .from('collections')
+        .select('user_id')
+        .eq('id', collection_id)
+        .single();
+
+    if (collectionErr || !collection) {
+        return res.status(404).json({ error: 'Collection not found' });
+    }
+    if (collection.user_id !== userId) {
+        return res.status(403).json({ error: 'Forbidden: you do not own this collection' });
     }
 
     const withdrawalAmount = roundCurrency(Number(amount));
