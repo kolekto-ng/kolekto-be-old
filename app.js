@@ -49,6 +49,13 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
+app.get("/", (req, res) => {
+    res.status(200).json({
+        success: true,
+        message: "Kolekto backend is running successfully"
+    });
+});
+
 app.use("/api", contributorRouter);
 app.use("/api/auth", authRouter);
 app.use("/api", collectorRouter);
