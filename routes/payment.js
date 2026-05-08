@@ -4,7 +4,8 @@ import {
     verifyPayment,
     listTransactions,
     fetchTransaction,
-    handleWebhook
+    handleWebhook,
+    sendReceiptNotification,
 } from "../controllers/deposit.js";
 
 const router = express.Router();
@@ -12,7 +13,7 @@ const router = express.Router();
 // Initialize a payment
 router.post("/initialize-payment", initializePayment);
 
-// Verify a payment
+// Verify a payment (called by frontend after Paystack redirect)
 router.get("/verify", verifyPayment);
 
 // List all transactions

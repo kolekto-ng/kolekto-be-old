@@ -9,6 +9,7 @@ const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 // settings routes - add multer middleware
 router.post("/upload-document", verifyToken, upload.array("files", 5), uploadDocument);
+router.post("/save-nin", verifyToken, saveNIN);
 
 router.post("/save-nin", verifyToken, saveNIN);
 router.get("/:userId", verifyToken, getDocuments);

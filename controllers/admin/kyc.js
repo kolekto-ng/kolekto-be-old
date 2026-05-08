@@ -13,10 +13,10 @@ const updateKycOverallStatus = async (userId) => {
             return { error: "KYC verification not found" };
         }
 
-        const { bvn_verified, bank_verified, identity_verified, address_verified } = kyc;
+        const { identity_verified, address_verified, nin_verified } = kyc;
 
-        // Check if all verifications are complete
-        const allVerified = bvn_verified && bank_verified && identity_verified && address_verified;
+        // Account is verified only when NIN, identity, and address are all approved.
+        const allVerified = Boolean(identity_verified && address_verified && nin_verified);
 
         let newStatus = kyc.status;
         let completedAt = kyc.completed_at;
@@ -44,6 +44,22 @@ const updateKycOverallStatus = async (userId) => {
 
             if (updateError) {
                 return { error: updateError.message };
+            }
+
+            // Mirror verification status onto the profiles table so the frontend
+            // can read it from a single source without joining kyc_verifications.
+            // Silently ignore if the column doesn't exist in this deployment.
+            try {
+                await supabase
+                    .from("profiles")
+                    .update({
+                        is_verified: newStatus === 'verified',
+                        verification_status: newStatus,
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq("id", userId);
+            } catch (_profileErr) {
+                // profiles.is_verified column is optional — don't block the response
             }
 
             return { success: true, kyc: updatedKyc };

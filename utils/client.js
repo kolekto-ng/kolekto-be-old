@@ -12,7 +12,7 @@ const supabaseKey =
 if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.warn(
         "SUPABASE_SERVICE_ROLE_KEY is not set; falling back to SUPABASE_ANON_KEY. " +
-            "If RLS blocks server-side writes, set SUPABASE_SERVICE_ROLE_KEY in kolekto-backend/.env."
+        "If RLS blocks server-side writes, set SUPABASE_SERVICE_ROLE_KEY in kolekto-backend/.env."
     );
 }
 

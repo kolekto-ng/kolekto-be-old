@@ -241,7 +241,10 @@ export const createCollection = async (req, res) => {
                     code_prefix: code_prefix || null,
                     max_contributions,
                     contributions_fields: contributions_fields || [],
-                    status: status || "active",
+                    // Fundraising campaigns require admin approval before contributors
+                    // can see or donate. Force pending_review regardless of what the
+                    // frontend sends so the collection is never accidentally made active.
+                    status: collectionType === "fundraising" ? "pending_review" : (status || "active"),
                     fee_bearer: fee_bearer || "organizer",
                     currency: currency || "NGN",
                     currency_symbol: currency_symbol || "₦",
@@ -397,6 +400,22 @@ export const getSingleCollection = async (req, res) => {
 
 export const editCollection = async (req, res) => {
     const { id } = req.params;
+    const requestingUserId = req.user?.id;
+
+    // ── Ownership check ──────────────────────────────────────────────────────
+    const { data: existing, error: ownerErr } = await supabase
+        .from('collections')
+        .select('user_id')
+        .eq('id', id)
+        .single();
+
+    if (ownerErr || !existing) {
+        return res.status(404).json({ error: 'Collection not found' });
+    }
+    if (existing.user_id !== requestingUserId) {
+        return res.status(403).json({ error: 'Forbidden: you do not own this collection' });
+    }
+
     const {
         title,
         description,
@@ -450,10 +469,24 @@ export const editCollection = async (req, res) => {
 export const updateCollectionStatus = async (req, res) => {
     const { id: collectionId } = req.params;
     const { newStatus } = req.body;
-    console.log(collectionId, newStatus);
+    const requestingUserId = req.user?.id;
 
     if (!collectionId || !newStatus) {
         return res.status(400).json({ error: "Collection ID and new status are required." });
+    }
+
+    // ── Ownership check ──────────────────────────────────────────────────────
+    const { data: existing, error: ownerErr } = await supabase
+        .from('collections')
+        .select('user_id')
+        .eq('id', collectionId)
+        .single();
+
+    if (ownerErr || !existing) {
+        return res.status(404).json({ error: 'Collection not found' });
+    }
+    if (existing.user_id !== requestingUserId) {
+        return res.status(403).json({ error: 'Forbidden: you do not own this collection' });
     }
 
     const { error } = await supabase

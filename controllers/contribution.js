@@ -42,6 +42,7 @@ export const getSingleCollection = async (req, res) => {
             wallets (
                 id,
                 available_balance,
+                pending_balance,
                 ledger_balance,
                 gross_payment,
                 net_payment,
@@ -119,10 +120,11 @@ export const createContribution = async (req, res) => {
         // Use the actual collection ID from the fetched collection
         const actualCollectionId = collection.id;
 
-        const { type: collection_type, fee_bearer, price_tiers, amount: collectionAmount } = collection;
+        const { collection_type: col_type_new, type: col_type_old, fee_bearer, price_tiers, amount: collectionAmount } = collection;
         console.log(collection, '<< collection details');
 
-        let collectionType = collection_type || "fixed";
+        // Use collection_type column first (new wizard), fall back to type column (legacy)
+        let collectionType = col_type_new || col_type_old || "fixed";
         let parsedAmount = null;
         let amountBreakdown = {};
 
@@ -224,12 +226,33 @@ export const createContribution = async (req, res) => {
             }
         }
         if (collectionType === 'fundraising') {
-            console.log('fundraising fee calculation', amount);
-
-            parsedAmount = parseFloat(amount + (amount * 0.025)); // minimum ₦100
-
+            const numericAmount = parseFloat(amount);
+            if (isNaN(numericAmount) || numericAmount <= 100) {
+                return res.status(400).json({ error: "Donation amount must be greater than ₦100" });
+            }
+            console.log('fundraising fee calculation', numericAmount);
+            parsedAmount = numericAmount + numericAmount * 0.025;
+        } else if (collectionType === 'open_pool') {
+            const numericAmount = parseFloat(amount);
+            if (isNaN(numericAmount) || numericAmount <= 0) {
+                return res.status(400).json({ error: "Contribution amount must be greater than ₦0" });
+            }
+            parsedAmount = numericAmount;
+        } else if (collectionType === 'ticket') {
+            // amount from frontend already includes quantity × price (and fees if contributor-borne)
+            const numericAmount = parseFloat(amount);
+            if (isNaN(numericAmount) || numericAmount <= 0) {
+                return res.status(400).json({ error: "Invalid ticket amount" });
+            }
+            parsedAmount = numericAmount;
         }
-        console.log(parsedAmount, 'parsd amo');
+        console.log(parsedAmount, 'parsd amo', collectionType);
+
+        // Final safety check: parsedAmount must be a positive number
+        if (parsedAmount === null || parsedAmount === undefined || isNaN(parsedAmount) || parsedAmount <= 0) {
+            console.error('parsedAmount is null/invalid for type:', collectionType, 'amount:', amount, 'collectionAmount:', collectionAmount);
+            return res.status(400).json({ error: `Could not determine contribution amount for collection type "${collectionType}". Please contact support.` });
+        }
 
         // Insert contributor
         const { data: contributorData, error: contributorError } = await supabase

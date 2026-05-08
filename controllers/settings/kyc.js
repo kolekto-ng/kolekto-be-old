@@ -175,6 +175,123 @@ export const uploadDocument = async (req, res, next) => {
 };
 
 
+export const saveNIN = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { nin } = req.body;
+
+        if (!nin || !/^\d{11}$/.test(nin)) {
+            return res.status(400).json({ error: "NIN must be exactly 11 digits" });
+        }
+
+        // Encrypt NIN with AES-256-CBC using the same key used for account numbers.
+        // AES-256 requires exactly 32 bytes — derive a stable 32-byte key via SHA-256
+        // so any length of ACCOUNT_ENCRYPTION_KEY works without throwing "Invalid key length".
+        const ENCRYPTION_KEY = process.env.ACCOUNT_ENCRYPTION_KEY;
+        const IV_LENGTH = 16;
+        let ninCipher = null;
+        if (ENCRYPTION_KEY) {
+            const crypto = await import("node:crypto");
+            // SHA-256 digest is always 32 bytes — safe to use as AES-256 key
+            const aesKey = crypto.createHash("sha256").update(ENCRYPTION_KEY).digest();
+            const iv = crypto.randomBytes(IV_LENGTH);
+            const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
+            let encrypted = cipher.update(nin);
+            encrypted = Buffer.concat([encrypted, cipher.final()]);
+            ninCipher = Buffer.concat([iv, encrypted]).toString('hex');
+        }
+
+        // Hash the NIN for lookup/comparison (SHA-256)
+        const cryptoMod = await import("node:crypto");
+        const ninHash = cryptoMod.createHash("sha256").update(nin).digest("hex");
+        const ninLast4 = nin.slice(-4);
+
+        // Ensure a KYC verification row exists so admin approval can toggle
+        // nin_verified and the frontend subscription has a record to watch.
+        const { data: existingKyc, error: kycLookupError } = await supabase
+            .from("kyc_verifications")
+            .select("id, status")
+            .eq("user_id", userId)
+            .maybeSingle();
+
+        if (kycLookupError) throw kycLookupError;
+
+        if (existingKyc?.id) {
+            if (existingKyc.status === "not_started") {
+                const { error: kycUpdateError } = await supabase
+                    .from("kyc_verifications")
+                    .update({
+                        status: "pending",
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq("id", existingKyc.id);
+
+                if (kycUpdateError) throw kycUpdateError;
+            }
+        } else {
+            const { error: kycInsertError } = await supabase
+                .from("kyc_verifications")
+                .insert({
+                    user_id: userId,
+                    status: "pending",
+                    nin_verified: false,
+                    identity_verified: false,
+                    address_verified: false,
+                });
+
+            if (kycInsertError) throw kycInsertError;
+        }
+
+        const identityPayload = {
+            user_id: userId,
+            nin_hash: ninHash,
+            nin_last4: ninLast4,
+            ...(ninCipher ? { nin_cipher: ninCipher } : {}),
+            updated_at: new Date().toISOString(),
+        };
+
+        // Avoid fragile upsert(onConflict: "user_id") behavior when the database
+        // does not have the exact UNIQUE constraint shape Supabase expects.
+        const { data: existingIdentity, error: lookupError } = await supabase
+            .from("user_identity")
+            .select("id")
+            .eq("user_id", userId)
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+        if (lookupError) throw lookupError;
+
+        if (existingIdentity?.id) {
+            const { error: updateError } = await supabase
+                .from("user_identity")
+                .update(identityPayload)
+                .eq("id", existingIdentity.id);
+
+            if (updateError) throw updateError;
+        } else {
+            // Some deployments define BVN fields as required on insert even when BVN
+            // has not been captured yet. Seed them with safe placeholders so NIN can
+            // still be stored and later replaced by the real BVN values.
+            const { error: insertError } = await supabase
+                .from("user_identity")
+                .insert({
+                    ...identityPayload,
+                    bvn_hash: "",
+                    bvn_last4: "",
+                    bvn_cipher: "",
+                });
+
+            if (insertError) throw insertError;
+        }
+
+        return res.json({ success: true, message: "NIN saved successfully" });
+    } catch (err) {
+        console.error("saveNIN error:", err);
+        return res.status(500).json({ error: "Failed to save NIN", details: err.message });
+    }
+};
+
 export const getDocuments = async (req, res) => {
     try {
         const userId = req.user.id;
