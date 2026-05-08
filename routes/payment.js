@@ -6,7 +6,6 @@ import {
     fetchTransaction,
     handleWebhook
 } from "../controllers/deposit.js";
-import { verifyPaystackIP } from "../middleware/verifyPaystickIp.js";
 
 const router = express.Router();
 
@@ -23,6 +22,7 @@ router.get("/transactions", listTransactions);
 router.get("/transaction/:id", fetchTransaction);
 
 // Paystack verify payment webhook endpoint
-router.post("/webhook", verifyPaystackIP, handleWebhook);
+// Signature verification in `handleWebhook` is sufficient and more robust than fixed IP allowlists.
+router.post("/webhook", handleWebhook);
 
 export default router;

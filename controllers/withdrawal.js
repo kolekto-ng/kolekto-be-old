@@ -148,6 +148,12 @@ export const requestWithdrawal = async (req, res) => {
         // Prepare and send emails (user + admin). Do not block response on email errors.
         (async () => {
             try {
+                const displayAccountNumber =
+                    accountNumber ||
+                    insertedWithdrawal?.destination_account?.accountNumber ||
+                    insertedWithdrawal?.destination_account?.account_number ||
+                    "";
+
                 // User email
                 try {
                     const userHtml = withdrawalRequestTemplate({
@@ -157,7 +163,7 @@ export const requestWithdrawal = async (req, res) => {
                         withdrawalId: insertedWithdrawal.id,
                         status: "received",
                         accountName,
-                        accountNumber,
+                        accountNumber: displayAccountNumber,
                         bankName: userBankName,
                         submittedAt: insertedWithdrawal.created_at || new Date().toISOString()
                     });
@@ -166,7 +172,7 @@ export const requestWithdrawal = async (req, res) => {
                         to: profile?.email,
                         subject: `Withdrawal Request Received - Kolekto`,
                         html: userHtml,
-                        text: `We received your withdrawal request of ${amount}. Withdrawal ID: ${insertedWithdrawal.id}`
+                        text: `We received your withdrawal request of ${amount}. Withdrawal ID: ${insertedWithdrawal.id}. Account Number: ${displayAccountNumber || "N/A"}`
                     });
                     console.log('✅ Withdrawal request email sent to requester');
                 } catch (userMailErr) {
@@ -185,7 +191,7 @@ export const requestWithdrawal = async (req, res) => {
                         currency: "NGN",
                         withdrawalId: insertedWithdrawal.id,
                         accountName,
-                        accountNumber,
+                        accountNumber: displayAccountNumber,
                         bankName: userBankName,
                         submittedAt: insertedWithdrawal.created_at || new Date().toISOString(),
                         approveUrl,
@@ -196,7 +202,7 @@ export const requestWithdrawal = async (req, res) => {
                         to: "gazalianfellow@gmail.com",
                         subject: `Withdrawal Approval Required - ${profile?.full_name || 'Requester'}`,
                         html: adminHtml,
-                        text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}`
+                        text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}. Account Number: ${displayAccountNumber || "N/A"}`
                     });
                     console.log('✅ Withdrawal approval request sent to admin');
                 } catch (adminMailErr) {

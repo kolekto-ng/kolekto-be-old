@@ -50,8 +50,16 @@ export async function updateWalletStats(collectionId, amount) {
     console.log(collectionId, amount, '<< updating wallet stats...');
 
     const [walletResult, collectionResult] = await Promise.all([
-        supabase.from("wallets").select("*").eq("collection_id", collectionId).single(),
-        supabase.from("collections").select("fee_bearer, type").eq("id", collectionId).single()
+        // Support duplicate wallet rows by always taking the latest.
+        supabase
+            .from("wallets")
+            .select("*")
+            .eq("collection_id", collectionId)
+            .order("updated_at", { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+        // Some environments use `collection_type` while older code used `type`.
+        supabase.from("collections").select("fee_bearer, collection_type, type").eq("id", collectionId).single()
     ]);
 
     const { data: wallet, error: walletError } = walletResult;
@@ -61,15 +69,17 @@ export async function updateWalletStats(collectionId, amount) {
     let netToAdd = Number(amount);
     console.log(wallet.fee_breakdown.tiers, collection, '<< wallet and collection details');
 
-    if (collection.type === "fixed") {
+    const collectionType = collection.collection_type || collection.type;
+
+    if (collectionType === "fixed") {
         const fees = Number(wallet?.fee_breakdown?.totalFees || 0);
         netToAdd = Number(amount) - fees;
         if (netToAdd < 0) netToAdd = 0;
-    } else if (collection.type === "tiered") {
+    } else if (collectionType === "tiered") {
         const tierObj = wallet.fee_breakdown?.tiers?.find(t => t.totalPayable === netToAdd);
         const tierFees = Number(tierObj?.totalFees || 0);
         netToAdd = Math.max(Number(amount) - tierFees, 0);
-    } else if (collection.type === "fundraising") {
+    } else if (collectionType === "fundraising") {
         const fees = 1.025;
         netToAdd = parseFloat((amount / fees).toFixed(2));
     }
@@ -626,7 +636,10 @@ export const fetchTransaction = async (req, res) => {
 
 // Helper: Verify Paystack signature
 async function verifyPaystackSignature(req) {
-    const payload = JSON.stringify(req.body);
+    // Prefer raw payload when available (required for Paystack signature validation).
+    const payload = Buffer.isBuffer(req.body)
+        ? req.body.toString("utf8")
+        : JSON.stringify(req.body);
     const signature = req.headers["x-paystack-signature"];
 
     if (crypto?.createHmac) {
@@ -654,14 +667,13 @@ async function verifyPaystackSignature(req) {
 
 // Handle webhook
 export const handleWebhook = async (req, res) => {
-    console.log("Webhook event received:", req.body);
+    const event = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString("utf8")) : req.body;
+    console.log("Webhook event received:", event);
 
     const isValid = await verifyPaystackSignature(req);
     if (!isValid) {
         return res.status(403).json({ error: "Invalid signature" });
     }
-
-    const event = req.body;
 
     if (event.event === "charge.success") {
         const reference = event.data.reference
@@ -803,18 +815,18 @@ export const handleWebhook = async (req, res) => {
                 .select()
                 .single();
 
-            if (organizerUpdated) {
-                const { data: collection } = await supabase
-                    .from("collections")
-                    .select("id, title, organizer_id")
-                    .eq("id", deposit.collection_id)
-                    .single();
+        if (organizerUpdated) {
+            const { data: collection } = await supabase
+                .from("collections")
+                .select("id, title, organizer_id")
+                .eq("id", deposit.collection_id)
+                .single();
 
-                const { data: organizer } = await supabase
-                    .from("profiles")
-                    .select("id, full_name, email")
-                    .eq("id", collection?.id)
-                    .single();
+            const { data: organizer } = await supabase
+                .from("profiles")
+                .select("id, full_name, email")
+                .eq("id", collection?.organizer_id)
+                .single();
 
                 try {
                     await sendEmail({
