@@ -10,6 +10,7 @@ import contributorRouter from "./routes/contribution.js";
 import withdrawalRouter from "./routes/withdrawal.js";
 import profileRouter from "./routes/settings/profile.js";
 import kycRouter from "./routes/settings/kyc.js";
+import securityRouter from "./routes/settings/security.js";
 import landingPageRouter from "./routes/landingPage.js";
 import adminRouter from "./routes/admin/kyc.js";
 import helmet from "helmet";
@@ -55,10 +56,11 @@ app.use("/api/payments", paymentRouter);
 app.use("/api/withdrawals", withdrawalRouter);
 app.use("/api/settings/profile", profileRouter);
 app.use("/api/settings/kyc", kycRouter);
+app.use("/api/settings/security", securityRouter);
 app.use("/api/landing-page", landingPageRouter);
 app.use("/api/adminurlabdkole", adminRouter);
 
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 5050;
 
 app.set('trust proxy', true);
 
@@ -74,6 +76,12 @@ const initializeEmailService = async () => {
 
 app.listen(port, async () => {
     console.log(`Server Running on port ${port}`);
-    // Initialize email service on startup
-    await initializeEmailService();
+    // Initialize email service on startup, but don't block the API in dev
+    if (process.env.NODE_ENV === "production") {
+        await initializeEmailService();
+    } else {
+        initializeEmailService().catch((error) => {
+            console.warn("Email service check skipped/failed in development:", error?.message || error);
+        });
+    }
 });

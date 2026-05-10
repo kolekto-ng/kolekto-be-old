@@ -144,6 +144,7 @@ function encryptAccountNumber(text) {
 
 export const saveAccount = async (req, res) => {
     const {
+        payoutAccountId: payout_account_id,
         bankCode: bank_code,
         bankName: bank_name,
         accountNumber: account_number,
@@ -200,10 +201,65 @@ export const saveAccount = async (req, res) => {
 
         const is_default = existingAccounts.length === 0; // first account becomes default
 
-        // i also want to confirm the bank they are adding account name corresponds with their profile name
+        // 7️⃣ Safe repair path: update existing account when the same account is being re-verified.
+        // This prevents duplicate rows and refreshes legacy ciphertext/recipient metadata.
+        let accountToUpdate = null;
 
+        if (payout_account_id) {
+            const { data: targetedAccount, error: targetedError } = await supabase
+                .from("payout_accounts")
+                .select("id, user_id")
+                .eq("id", payout_account_id)
+                .eq("user_id", user_id)
+                .maybeSingle();
 
-        // 7️⃣ Insert payout account
+            if (targetedError) throw targetedError;
+            accountToUpdate = targetedAccount || null;
+        }
+
+        if (!accountToUpdate) {
+            const { data: matchedAccount, error: matchedError } = await supabase
+                .from("payout_accounts")
+                .select("id, user_id")
+                .eq("user_id", user_id)
+                .eq("bank_code", bank_code)
+                .eq("account_last4", last4)
+                .eq("account_name", account_name)
+                .order("updated_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+            if (matchedError) throw matchedError;
+            accountToUpdate = matchedAccount || null;
+        }
+
+        if (accountToUpdate) {
+            const { data: updatedAccount, error: updateError } = await supabase
+                .from("payout_accounts")
+                .update({
+                    provider,
+                    recipient_code,
+                    account_number_cipher: encryptedAccount,
+                    account_last4: last4,
+                    bank_code,
+                    bank_name,
+                    account_name,
+                    updated_at: new Date().toISOString()
+                })
+                .eq("id", accountToUpdate.id)
+                .eq("user_id", user_id)
+                .select()
+                .single();
+
+            if (updateError) throw updateError;
+
+            return res.status(200).json({
+                ...updatedAccount,
+                repaired: true
+            });
+        }
+
+        // 8️⃣ Insert new payout account
         const { data, error } = await supabase
             .from("payout_accounts")
             .insert([{
@@ -222,7 +278,10 @@ export const saveAccount = async (req, res) => {
 
         if (error) throw error;
 
-        res.status(201).json(data);
+        res.status(201).json({
+            ...data,
+            repaired: false
+        });
     } catch (err) {
         console.error("Save Account Error:", err);
         res.status(500).json({ error: err.message });

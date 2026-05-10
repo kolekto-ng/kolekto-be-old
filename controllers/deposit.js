@@ -13,6 +13,95 @@ import {
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
 
+/**
+ * Validate the client-supplied contribution amount against collection settings.
+ *
+ * Returns null when the amount is valid, or an error string when it is not.
+ * The caller must reject the request if a non-null string is returned.
+ *
+ * Amount tolerance: ₦1 to absorb minor floating-point rounding differences.
+ */
+function validateContributionAmount({ collectionType, collection, netAmount, metadata }) {
+    const TOLERANCE = 1; // ₦1
+    const amount = roundCurrency(netAmount);
+
+    if (!amount || amount <= 0) {
+        return "Contribution amount must be greater than zero";
+    }
+
+    switch (collectionType) {
+        case 'fixed': {
+            const expected = roundCurrency(Number(collection.amount || 0));
+            if (Math.abs(amount - expected) > TOLERANCE) {
+                return `Invalid amount for fixed collection: expected ₦${expected}, received ₦${amount}`;
+            }
+            break;
+        }
+
+        case 'tiered': {
+            const tiers = collection.price_tiers || collection.pricing_tiers || [];
+            if (!tiers.length) break; // no tiers configured — allow any amount
+
+            const tierId = metadata?.selectedTierId;
+            const tierName = metadata?.selectedTier;
+            const qty = Math.max(1, Number(metadata?.quantity || 1));
+
+            const matchedTier = tiers.find((t) =>
+                (tierId && String(t.id) === String(tierId)) ||
+                (tierName && String(t.name) === String(tierName))
+            );
+
+            if (matchedTier) {
+                const expected = roundCurrency(Number(matchedTier.price) * qty);
+                if (Math.abs(amount - expected) > TOLERANCE) {
+                    return `Invalid amount for tiered collection: expected ₦${expected} (${qty}× ₦${matchedTier.price}), received ₦${amount}`;
+                }
+            }
+            break;
+        }
+
+        case 'ticket': {
+            const tiers = collection.price_tiers || collection.pricing_tiers || [];
+            const ticketSelections = Array.isArray(metadata?.ticketSelections)
+                ? metadata.ticketSelections
+                : [];
+
+            if (tiers.length && ticketSelections.length) {
+                let expected = 0;
+                for (const sel of ticketSelections) {
+                    const tier = tiers.find(
+                        (t) => String(t.id) === String(sel.tierId) ||
+                            String(t.name) === String(sel.tierName)
+                    );
+                    if (tier) expected += roundCurrency(Number(tier.price) * Number(sel.quantity || 1));
+                }
+                expected = roundCurrency(expected);
+                if (expected > 0 && Math.abs(amount - expected) > TOLERANCE) {
+                    return `Invalid ticket amount: expected ₦${expected}, received ₦${amount}`;
+                }
+            }
+            break;
+        }
+
+        case 'open_pool':
+        case 'fundraising': {
+            // Any positive amount is valid; enforce minimum if configured
+            const minimum = roundCurrency(
+                Number(collection.minimum_amount || collection.minimum_donation || 0)
+            );
+            if (minimum > 0 && amount < minimum - TOLERANCE) {
+                return `Minimum contribution for this collection is ₦${minimum}`;
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+
+    return null; // valid
+}
+
 const paystackHeaders = {
     Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
     "Content-Type": "application/json",
@@ -33,108 +122,58 @@ export async function updateWalletStats(collectionId, grossAmountPaid) {
     if (!collectionId || !grossAmountPaid || grossAmountPaid <= 0) return;
 
     console.log(`[updateWalletStats] collectionId=${collectionId}, grossAmountPaid=${grossAmountPaid}`);
-
     try {
-        // Fetch collection to determine type and fee_bearer
-        const { data: collection, error: collectionError } = await supabase
-            .from("collections")
-            .select("fee_bearer, type, collection_type")
-            .eq("id", collectionId)
-            .single();
+        const [walletResult, collectionResult] = await Promise.all([
+            // Support duplicate wallet rows by always taking the latest.
+            supabase
+                .from("wallets")
+                .select("*")
+                .eq("collection_id", collectionId)
+                .order("updated_at", { ascending: false })
+                .limit(1)
+                .maybeSingle(),
+            // Some environments use `collection_type` while older code used `type`.
+            supabase.from("collections").select("fee_bearer, collection_type, type").eq("id", collectionId).single()
+        ]);
 
-        if (collectionError || !collection) {
-            console.error("[updateWalletStats] Failed to fetch collection:", collectionError);
-            return;
+        const { data: wallet, error: walletError } = walletResult;
+        const { data: collection, error: collectionError } = collectionResult;
+        if (walletError || !wallet || collectionError || !collection) return;
+
+        let netToAdd = Number(grossAmountPaid);
+        console.log(wallet.fee_breakdown?.tiers || [], collection, "<< wallet and collection details");
+
+        const collectionType = collection.collection_type || collection.type;
+
+        if (collectionType === "fixed") {
+            const fees = Number(wallet?.fee_breakdown?.totalFees || 0);
+            netToAdd = Number(grossAmountPaid) - fees;
+            if (netToAdd < 0) netToAdd = 0;
+        } else if (collectionType === "tiered") {
+            const tierObj = wallet.fee_breakdown?.tiers?.find(t => t.totalPayable === netToAdd);
+            const tierFees = Number(tierObj?.totalFees || 0);
+            netToAdd = Math.max(Number(grossAmountPaid) - tierFees, 0);
+        } else if (collectionType === "fundraising") {
+            const fees = 1.025;
+            netToAdd = parseFloat((grossAmountPaid / fees).toFixed(2));
         }
 
-        const collectionType = collection.collection_type || collection.type || "fixed";
-        const feeBearer = collection.fee_bearer || "organizer";
+        const newGrossPayment = Number(wallet.gross_payment || 0) + Number(grossAmountPaid);
+        const newNetPayment = Number(wallet.net_payment || 0) + netToAdd;
+        const newPendingBalance = Number(wallet.pending_balance || 0) + netToAdd;
+        const newLedgerBalance = Number(wallet.ledger_balance || 0) + netToAdd;
 
-        // Derive net contribution amount from the gross amount charged
-        const { totalFees } = calculateFees(
-            feeBearer === "contributor"
-                ? roundCurrency(grossAmountPaid / (1 + (collectionType === "fundraising" ? 0.025 : 0.02)))
-                : grossAmountPaid,
-            collectionType,
-            feeBearer
-        );
-
-        // Net amount = what the organizer earns from this payment
-        const netContribution =
-            feeBearer === "contributor"
-                ? roundCurrency(grossAmountPaid - totalFees)
-                : roundCurrency(grossAmountPaid);
-
-        // Fetch all paid contributions to recompute totals from scratch
-        const { data: paidContributions, error: contribError } = await supabase
-            .from("contributions")
-            .select("amount, gross_amount, created_at")
-            .eq("collection_id", collectionId)
-            .eq("status", "paid");
-
-        if (contribError) {
-            console.error("[updateWalletStats] Failed to fetch contributions:", contribError);
-            return;
-        }
-
-        // Fetch all withdrawals
-        const { data: withdrawals } = await supabase
-            .from("withdrawals")
-            .select("amount, status")
-            .eq("collection_id", collectionId);
-
-        const balances = computeWalletBalances(paidContributions || [], withdrawals || []);
-
-        // Explicit SELECT-then-UPDATE-or-INSERT (upsert with onConflict silently fails
-        // if no UNIQUE constraint exists on wallets.collection_id).
-        const walletPayload = {
-            collection_id: collectionId,
-            gross_payment: balances.grossPayment,
-            net_payment: balances.netPayment,
-            pending_balance: balances.pendingBalance,
-            available_balance: balances.availableBalance,
-            ledger_balance: balances.ledgerBalance,
-            withdrawn: balances.completedWithdrawals,
-            currency: "NGN",
-            currency_symbol: "₦",
-            updated_at: new Date().toISOString(),
-        };
-
-        const { data: existingWallet, error: walletCheckErr } = await supabase
+        await supabase
             .from("wallets")
-            .select("id")
-            .eq("collection_id", collectionId)
-            .order("created_at", { ascending: true })
-            .limit(1)
-            .maybeSingle();
+            .update({
+                gross_payment: newGrossPayment,
+                net_payment: newNetPayment,
+                pending_balance: newPendingBalance,
+                ledger_balance: newLedgerBalance,
+                updated_at: new Date()
+            })
+            .eq("id", wallet.id);
 
-        if (walletCheckErr) {
-            console.error("[updateWalletStats] Wallet lookup failed:", walletCheckErr);
-            return;
-        }
-
-        if (existingWallet) {
-            const { error: updateErr } = await supabase
-                .from("wallets")
-                .update(walletPayload)
-                .eq("id", existingWallet.id);
-            if (updateErr) {
-                console.error("[updateWalletStats] ❌ Wallet UPDATE failed:", updateErr);
-                return;
-            }
-            console.log("[updateWalletStats] ✅ Wallet UPDATED:", existingWallet.id);
-        } else {
-            const { error: insertErr } = await supabase
-                .from("wallets")
-                .insert(walletPayload);
-            if (insertErr) {
-                console.error("[updateWalletStats] ❌ Wallet INSERT failed:", insertErr);
-                return;
-            }
-            console.log("[updateWalletStats] ✅ Wallet INSERTED for collection:", collectionId);
-        }
-
-        // Increment total_contributions on the collection
         const { data: currentCollection } = await supabase
             .from("collections")
             .select("total_contributions")
@@ -150,16 +189,17 @@ export async function updateWalletStats(collectionId, grossAmountPaid) {
             .eq("id", collectionId);
 
         console.log(`[updateWalletStats] ✅ Wallet updated for ${collectionId}:`, {
-            netContribution,
-            netPayment: balances.netPayment,
-            pendingBalance: balances.pendingBalance,
-            availableBalance: balances.availableBalance,
-            ledgerBalance: balances.ledgerBalance,
+            netContribution: netToAdd,
+            netPayment: newNetPayment,
+            pendingBalance: newPendingBalance,
+            availableBalance: Math.max(0, newLedgerBalance - newPendingBalance),
+            ledgerBalance: newLedgerBalance,
         });
     } catch (err) {
         console.error("[updateWalletStats] Unexpected error:", err?.message || err);
     }
 }
+
 
 // Initialize a payment (get payment link)
 // Accepts two formats:
@@ -236,6 +276,33 @@ export const initializePayment = async (req, res) => {
 
         if (collectionError || !collection) {
             return res.status(404).json({ error: "Collection not found", collectionId, supabaseError: collectionError?.message });
+        }
+
+        // ── Server-side amount validation ────────────────────────────────────
+        // Recompute the expected net contribution from collection settings so
+        // that a tampered client payload cannot change what Paystack charges.
+        const collType = collection.collection_type || collection.collectionType || 'fixed';
+        const feeBearer = (isNewFormat ? body.metadata?.feeBearer : null)
+            || collection.fee_bearer
+            || 'organizer';
+
+        const amountError = validateContributionAmount({
+            collectionType: collType,
+            collection,
+            netAmount,
+            metadata: isNewFormat ? body.metadata : null,
+        });
+        if (amountError) {
+            return res.status(400).json({ error: amountError });
+        }
+
+        // Re-derive totalPayable server-side — ignore whatever the client sent
+        const { totalPayable: serverTotalPayable } = calculateFees(netAmount, collType, feeBearer);
+        totalPayable = serverTotalPayable;
+        // Keep paystackMeta in sync with server-computed values
+        if (isNewFormat) {
+            paystackMeta.totalPayable = totalPayable;
+            paystackMeta.feeBearer = feeBearer;
         }
 
         let contributorId;
@@ -406,7 +473,116 @@ export const verifyPayment = async (req, res) => {
         .single();
 
     if (fetchError || !existingDeposit) {
-        return res.status(404).json({ error: "Deposit not found" });
+        // ── Fallback: payment was initiated via Supabase Edge Function, so no
+        // deposits record exists. Verify directly with Paystack and read from
+        // the contributions table (which the edge function always writes to).
+        try {
+            const paystackRes = await axios.get(
+                `${PAYSTACK_BASE_URL}/transaction/verify/${reference}`,
+                { headers: paystackHeaders }
+            );
+            const tx = paystackRes.data.data;
+
+            const meta = (tx.metadata && typeof tx.metadata === "object") ? tx.metadata : {};
+            const collectionId = String(meta.collectionId || meta.collection_id || "").trim();
+            if (!collectionId) {
+                return res.status(404).json({ error: "Deposit not found and no collection ID in payment metadata." });
+            }
+
+            const [{ data: contribution }, { data: collection }] = await Promise.all([
+                supabase
+                    .from("contributions")
+                    .select("*")
+                    .eq("payment_reference", reference)
+                    .eq("collection_id", collectionId)
+                    .order("created_at", { ascending: true })
+                    .limit(1)
+                    .maybeSingle(),
+                supabase
+                    .from("collections")
+                    .select("*")
+                    .eq("id", collectionId)
+                    .single(),
+            ]);
+
+            if (!collection) {
+                return res.status(404).json({ error: "Collection not found for this payment." });
+            }
+
+            const fallbackNetAmount = contribution?.amount ?? roundCurrency(Number(tx.amount || 0) / 100);
+            const fallbackTotalPaid = roundCurrency(Number(tx.amount || 0) / 100);
+            const fallbackCollType = collection.collection_type || collection.type || "fixed";
+            const fallbackFeeBearer = collection.fee_bearer || "organizer";
+            const { platformFee: fbPlatformFee, gatewayFee: fbGatewayFee } =
+                calculateFees(fallbackNetAmount, fallbackCollType, fallbackFeeBearer);
+            const fallbackTotalFees = roundCurrency(fallbackTotalPaid - fallbackNetAmount);
+
+            const fallbackParticipants = contribution
+                ? [{
+                    id: contribution.id,
+                    uniqueCode: contribution.contributor_unique_code || null,
+                    details: formatDetails(contribution.contributor_information),
+                }]
+                : [];
+
+            const fallbackTicketSelections =
+                contribution?.contributor_information?.[0]?._ticketSelections || [];
+
+            const fallbackReceiptData = {
+                collectionTitle: collection.title || "",
+                collectionType: fallbackCollType,
+                description: collection.description || "",
+                campaignSummary: collection.campaign_summary || "",
+                bannerUrl: collection.banner_url || collection.banner_image || "",
+                eventDate: collection.event_date || "",
+                uniqueIdEnabled: Boolean(collection.unique_id_enabled),
+                codePrefix: collection.code_prefix || "",
+                contributionAmount: fallbackNetAmount,
+                platformFee: fbPlatformFee,
+                gatewayFee: fbGatewayFee,
+                totalFees: fallbackTotalFees > 0 ? fallbackTotalFees : 0,
+                totalPaid: fallbackTotalPaid,
+                participants: fallbackParticipants,
+                ticketSelections: fallbackTicketSelections,
+                transactionRef: String(tx.reference || reference),
+                status: String(tx.status || "success"),
+                paidAt: tx.paid_at || new Date().toISOString(),
+                channel: tx.channel || "",
+                currency: tx.currency || "NGN",
+                payer: {
+                    name: contribution?.name || String(tx.customer?.email || "").split("@")[0] || "",
+                    email: contribution?.email || String(tx.customer?.email || ""),
+                    phone: contribution?.phone || "",
+                },
+            };
+
+            // Send receipt email (non-blocking, best-effort)
+            if (tx.status === "success" && fallbackReceiptData.payer.email) {
+                sendPaymentConfirmation(
+                    fallbackReceiptData.payer.email,
+                    fallbackReceiptData.payer.name,
+                    collection.title,
+                    fallbackTotalPaid,
+                    tx.currency || "NGN",
+                    String(tx.reference || reference),
+                    tx.paid_at,
+                    tx.channel,
+                    fallbackParticipants,
+                    `${process.env.FRONTEND_URL}/payment/verify?reference=${reference}`,
+                    collection.title
+                ).catch((err) =>
+                    console.error("[verifyPayment fallback] email error:", err?.message || err)
+                );
+            }
+
+            return res.status(200).json({
+                message: "Payment verified",
+                receiptData: fallbackReceiptData,
+            });
+        } catch (fallbackErr) {
+            console.error("[verifyPayment fallback] error:", fallbackErr?.message);
+            return res.status(404).json({ error: "Deposit not found and fallback verification failed." });
+        }
     }
 
     // Already successful — return cached data and resend confirmation if needed
@@ -444,7 +620,14 @@ export const verifyPayment = async (req, res) => {
             contributor?.contributor_information?.[0]?._ticketSelections || [];
 
         const receiptData = {
-            collectionTitle: collection?.title,
+            collectionTitle: collection?.title || "",
+            collectionType: collection?.collection_type || collection?.type || "fixed",
+            description: collection?.description || "",
+            campaignSummary: collection?.campaign_summary || "",
+            bannerUrl: collection?.banner_url || collection?.banner_image || "",
+            eventDate: collection?.event_date || "",
+            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
+            codePrefix: collection?.code_prefix || "",
             contributionAmount: existingNetAmount,
             platformFee: exPlatformFee,
             gatewayFee: exGatewayFee,
@@ -709,7 +892,14 @@ export const verifyPayment = async (req, res) => {
             contributor?.contributor_information?.[0]?._ticketSelections || [];
 
         const receiptData = {
-            collectionTitle: collection?.title,
+            collectionTitle: collection?.title || "",
+            collectionType: collection?.collection_type || collection?.type || "fixed",
+            description: collection?.description || "",
+            campaignSummary: collection?.campaign_summary || "",
+            bannerUrl: collection?.banner_url || collection?.banner_image || "",
+            eventDate: collection?.event_date || "",
+            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
+            codePrefix: collection?.code_prefix || "",
             contributionAmount: verNetAmount,
             platformFee: verPlatformFee,
             gatewayFee: verGatewayFee,
@@ -778,7 +968,10 @@ export const fetchTransaction = async (req, res) => {
 
 // Verify Paystack webhook signature
 async function verifyPaystackSignature(req) {
-    const payload = JSON.stringify(req.body);
+    // Prefer raw payload when available (required for Paystack signature validation).
+    const payload = Buffer.isBuffer(req.body)
+        ? req.body.toString("utf8")
+        : JSON.stringify(req.body);
     const signature = req.headers["x-paystack-signature"];
 
     if (crypto?.createHmac) {
@@ -806,14 +999,13 @@ async function verifyPaystackSignature(req) {
 
 // Handle Paystack webhook
 export const handleWebhook = async (req, res) => {
-    console.log("Webhook event received:", req.body?.event);
+    const event = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString("utf8")) : req.body;
+    console.log("Webhook event received:", event);
 
     const isValid = await verifyPaystackSignature(req);
     if (!isValid) {
         return res.status(403).json({ error: "Invalid signature" });
     }
-
-    const event = req.body;
 
     if (event.event === "charge.success") {
         const reference = event.data.reference;
@@ -974,14 +1166,14 @@ export const handleWebhook = async (req, res) => {
             if (organizerUpdated) {
                 const { data: collection } = await supabase
                     .from("collections")
-                    .select("id, title, user_id")
+                    .select("id, title, organizer_id")
                     .eq("id", deposit.collection_id)
                     .single();
 
                 const { data: organizer } = await supabase
                     .from("profiles")
                     .select("id, full_name, email")
-                    .eq("id", collection?.user_id)
+                    .eq("id", collection?.organizer_id)
                     .single();
 
                 await sendEmail({
@@ -1002,10 +1194,133 @@ export const handleWebhook = async (req, res) => {
     res.status(200).send("Webhook received");
 };
 
+/**
+ * POST /api/payments/send-receipt
+ *
+ * Internal endpoint called by the Supabase Edge Function after a successful
+ * payment. Sends a confirmation email to the contributor and notifies the
+ * organizer, using the existing Zoho SMTP email infrastructure.
+ *
+ * Secured by an optional x-internal-secret header
+ * (set INTERNAL_NOTIFY_SECRET in backend .env and as a Supabase secret).
+ */
+export const sendReceiptNotification = async (req, res) => {
+    // Optional simple secret header guard (prevents abuse from the public internet)
+    const internalSecret = process.env.INTERNAL_NOTIFY_SECRET;
+    if (internalSecret) {
+        const provided = req.headers["x-internal-secret"];
+        if (provided !== internalSecret) {
+            return res.status(403).json({ error: "Forbidden" });
+        }
+    }
+
+    const {
+        payerEmail,
+        payerName,
+        collectionTitle,
+        totalPaid,
+        currency = "NGN",
+        transactionRef,
+        paidAt,
+        channel = "card",
+        participants = [],
+        collectionId,
+    } = req.body || {};
+
+    if (!payerEmail || !collectionTitle || !transactionRef) {
+        return res.status(400).json({
+            error: "payerEmail, collectionTitle, and transactionRef are required",
+        });
+    }
+
+    const results = { payer: null, organizer: null };
+
+    // ── Contributor receipt email ────────────────────────────────────────────
+    try {
+        results.payer = await sendPaymentConfirmation(
+            payerEmail,
+            payerName || payerEmail.split("@")[0],
+            collectionTitle,
+            totalPaid,
+            currency,
+            transactionRef,
+            paidAt || new Date().toISOString(),
+            channel,
+            participants,
+            `${process.env.FRONTEND_URL}/payment/verify?reference=${transactionRef}`,
+            collectionTitle
+        );
+        console.log("[sendReceiptNotification] ✅ Contributor email sent to", payerEmail);
+    } catch (err) {
+        console.error("[sendReceiptNotification] ❌ Contributor email error:", err?.message);
+    }
+
+    // ── Organizer notification ───────────────────────────────────────────────
+    if (collectionId) {
+        try {
+            const { data: coll } = await supabase
+                .from("collections")
+                .select("title, user_id")
+                .eq("id", collectionId)
+                .single();
+
+            if (coll?.user_id) {
+                const { data: organizer } = await supabase
+                    .from("profiles")
+                    .select("email, full_name")
+                    .eq("id", coll.user_id)
+                    .single();
+
+                if (organizer?.email) {
+                    const amountFormatted = new Intl.NumberFormat("en-NG", {
+                        style: "currency", currency, minimumFractionDigits: 2,
+                    }).format(totalPaid || 0);
+
+                    results.organizer = await sendEmail({
+                        to: organizer.email,
+                        subject: `New Payment Received — ${collectionTitle}`,
+                        html: `
+                          <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px;">
+                            <div style="background:linear-gradient(135deg,#1B5E20,#388E3C);padding:24px;border-radius:8px 8px 0 0;text-align:center;">
+                              <h1 style="color:#fff;margin:0;font-size:20px;">New Payment Received</h1>
+                            </div>
+                            <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
+                              <p style="color:#374151;margin:0 0 16px;">Hi <strong>${organizer.full_name || "there"}</strong>,</p>
+                              <p style="color:#4b5563;margin:0 0 24px;">You have received a new payment for <strong>${collectionTitle}</strong>.</p>
+                              <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                                <tr style="border-bottom:1px solid #f3f4f6;">
+                                  <td style="padding:10px 0;color:#6b7280;">Payer</td>
+                                  <td style="padding:10px 0;color:#111827;font-weight:600;text-align:right;">${payerName || payerEmail}</td>
+                                </tr>
+                                <tr style="border-bottom:1px solid #f3f4f6;">
+                                  <td style="padding:10px 0;color:#6b7280;">Amount</td>
+                                  <td style="padding:10px 0;color:#16a34a;font-weight:700;font-size:16px;text-align:right;">${amountFormatted}</td>
+                                </tr>
+                                <tr>
+                                  <td style="padding:10px 0;color:#6b7280;">Reference</td>
+                                  <td style="padding:10px 0;color:#111827;font-family:monospace;text-align:right;">${transactionRef}</td>
+                                </tr>
+                              </table>
+                              <p style="color:#9ca3af;font-size:12px;margin:24px 0 0;text-align:center;">Kolekto · Secure group payments</p>
+                            </div>
+                          </div>`,
+                    });
+                    console.log("[sendReceiptNotification] ✅ Organizer email sent to", organizer.email);
+                }
+            }
+        } catch (err) {
+            console.error("[sendReceiptNotification] ❌ Organizer email error:", err?.message);
+        }
+    }
+
+    return res.status(200).json({ success: true, results });
+};
+
 export default {
     initializePayment,
     verifyPayment,
     listTransactions,
     fetchTransaction,
     handleWebhook,
+    sendReceiptNotification,
 };

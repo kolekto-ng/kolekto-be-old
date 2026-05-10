@@ -11,6 +11,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 router.post("/upload-document", verifyToken, upload.array("files", 5), uploadDocument);
 router.post("/save-nin", verifyToken, saveNIN);
 
+router.post("/save-nin", verifyToken, saveNIN);
 router.get("/:userId", verifyToken, getDocuments);
 
 

@@ -49,8 +49,10 @@ async function refreshWallet(walletId, collectionId) {
 }
 
 export const requestWithdrawal = async (req, res) => {
+    // ── Use the authenticated user's ID — never trust the body ───────────────
+    const userId = req.user?.id;
+
     const {
-        organizer_id: userId,
         collection_id,
         amount,
         account_number: accountNumber,
@@ -61,6 +63,20 @@ export const requestWithdrawal = async (req, res) => {
 
     if (!userId || !collection_id || !amount || !accountNumber || !accountName || !userBankName) {
         return res.status(400).json({ error: "Missing required withdrawal fields" });
+    }
+
+    // ── Verify the requesting user owns this collection ──────────────────────
+    const { data: collection, error: collectionErr } = await supabase
+        .from('collections')
+        .select('user_id')
+        .eq('id', collection_id)
+        .single();
+
+    if (collectionErr || !collection) {
+        return res.status(404).json({ error: 'Collection not found' });
+    }
+    if (collection.user_id !== userId) {
+        return res.status(403).json({ error: 'Forbidden: you do not own this collection' });
     }
 
     const withdrawalAmount = roundCurrency(Number(amount));
@@ -206,23 +222,66 @@ export const requestWithdrawal = async (req, res) => {
         // Fire-and-forget email notifications
         (async () => {
             try {
-                const userHtml = withdrawalRequestTemplate({
-                    userName: profile?.full_name || "User",
-                    amount: withdrawalAmount,
-                    currency: "NGN",
-                    withdrawalId: insertedWithdrawal.id,
-                    status: "received",
-                    accountName,
-                    accountNumber,
-                    bankName: userBankName,
-                    submittedAt: insertedWithdrawal.created_at || new Date().toISOString(),
-                });
-                await sendEmail({
-                    to: profile?.email,
-                    subject: `Withdrawal Request Received - Kolekto`,
-                    html: userHtml,
-                    text: `We received your withdrawal request of ₦${withdrawalAmount}. ID: ${insertedWithdrawal.id}`,
-                });
+                const displayAccountNumber =
+                    accountNumber ||
+                    insertedWithdrawal?.destination_account?.accountNumber ||
+                    insertedWithdrawal?.destination_account?.account_number ||
+                    "";
+
+                // User email
+                try {
+                    const userHtml = withdrawalRequestTemplate({
+                        userName: profile?.full_name || "User",
+                        amount,
+                        currency: "NGN",
+                        withdrawalId: insertedWithdrawal.id,
+                        status: "received",
+                        accountName,
+                        accountNumber: displayAccountNumber,
+                        bankName: userBankName,
+                        submittedAt: insertedWithdrawal.created_at || new Date().toISOString()
+                    });
+
+                    await sendEmail({
+                        to: profile?.email,
+                        subject: `Withdrawal Request Received - Kolekto`,
+                        html: userHtml,
+                        text: `We received your withdrawal request of ${amount}. Withdrawal ID: ${insertedWithdrawal.id}. Account Number: ${displayAccountNumber || "N/A"}`
+                    });
+                    console.log('✅ Withdrawal request email sent to requester');
+                } catch (userMailErr) {
+                    console.error('Failed to send withdrawal email to user:', userMailErr?.message || userMailErr);
+                }
+
+                // Admin email (notify approver)
+                try {
+                    const approveUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/approve?id=${insertedWithdrawal.id}`;
+                    const declineUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/decline?id=${insertedWithdrawal.id}`;
+
+                    const adminHtml = withdrawalApprovalRequestTemplate({
+                        adminName: "Gazali",
+                        userName: profile?.full_name || "User",
+                        amount,
+                        currency: "NGN",
+                        withdrawalId: insertedWithdrawal.id,
+                        accountName,
+                        accountNumber: displayAccountNumber,
+                        bankName: userBankName,
+                        submittedAt: insertedWithdrawal.created_at || new Date().toISOString(),
+                        approveUrl,
+                        declineUrl
+                    });
+
+                    await sendEmail({
+                        to: "gazalianfellow@gmail.com",
+                        subject: `Withdrawal Approval Required - ${profile?.full_name || 'Requester'}`,
+                        html: adminHtml,
+                        text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}. Account Number: ${displayAccountNumber || "N/A"}`
+                    });
+                    console.log('✅ Withdrawal approval request sent to admin');
+                } catch (adminMailErr) {
+                    console.error('Failed to send withdrawal approval email to admin:', adminMailErr?.message || adminMailErr);
+                }
             } catch (err) {
                 console.error("Failed to send withdrawal email to user:", err?.message || err);
             }
@@ -539,13 +598,5 @@ export const rejectWithdrawal = async (req, res) => {
         .update({ status: "rejected" })
         .eq("id", withdrawal.id);
 
-    // Recompute all balances from source of truth (rejection restores available balance)
-    const balances = await refreshWallet(wallet.id, withdrawal.collection_id);
-
-    return res.status(200).json({
-        success: true,
-        message: "Withdrawal rejected and available balance refunded successfully",
-        available_balance: balances?.availableBalance || 0,
-        ledger_balance: balances?.ledgerBalance || 0,
-    });
+    return res.status(200).json({ success: true, message: "Withdrawal rejected and available balance refunded successfully" });
 };

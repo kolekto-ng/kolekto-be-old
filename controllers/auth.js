@@ -66,7 +66,16 @@ export const signIn = async (req, res) => {
 // Sign Up
 export const signUp = async (req, res) => {
 
-    const { email, password, firstName, lastName, phoneNumber, recaptcherToken: token, recatcherType: type } = req.body;
+    const {
+        email,
+        password,
+        firstName,
+        lastName,
+        phoneNumber,
+        recaptcherToken: token,
+        recatcherType: type,
+        emailRedirectTo,
+    } = req.body;
 
     if (!email || !password || !firstName || !lastName || !phoneNumber) {
         return res.status(400).json({ error: "Email, password, first name and last name are required." });
@@ -115,6 +124,7 @@ export const signUp = async (req, res) => {
         password,
         phone: phoneNumber,
         options: {
+            emailRedirectTo: emailRedirectTo || process.env.FRONTEND_URL,
             data: {
                 phone: phoneNumber,
                 first_name: firstName,
@@ -127,7 +137,14 @@ export const signUp = async (req, res) => {
     if (error) {
         return res.status(400).json({ error: error.message });
     }
-    return res.status(201).json({ user: data.user });
+    return res.status(201).json({
+        user: data.user,
+        session: data.session || null,
+        requiresEmailVerification: !data.session,
+        message: data.session
+            ? "Account created successfully."
+            : "Account created. Please verify your email before signing in.",
+    });
 };
 
 // Sign Out
