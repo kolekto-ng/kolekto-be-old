@@ -26,9 +26,37 @@ function otpHash(userId, otp) {
   return sha256(`${userId}:${otp}:${otpPepper()}`);
 }
 
+async function resolveUserEmail(userId, fallbackEmail) {
+  if (fallbackEmail) return fallbackEmail;
+
+  try {
+    const { data, error } = await supabase.auth.admin.getUserById(userId);
+    if (!error && data?.user?.email) {
+      return data.user.email;
+    }
+  } catch (err) {
+    console.error("resolveUserEmail auth lookup error:", err);
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("email")
+      .eq("id", userId)
+      .maybeSingle();
+    if (!error && data?.email) {
+      return data.email;
+    }
+  } catch (err) {
+    console.error("resolveUserEmail profile lookup error:", err);
+  }
+
+  return null;
+}
+
 export const requestPasswordChangeOtp = async (req, res) => {
   const userId = req.user?.id;
-  const email = req.user?.email;
+  const email = await resolveUserEmail(req.user?.id, req.user?.email);
 
   if (!userId || !email) {
     return res.status(401).json({ error: "Unauthorized" });
@@ -142,12 +170,11 @@ export const requestPasswordChangeOtp = async (req, res) => {
 
 export const verifyOtpAndChangePassword = async (req, res) => {
   const userId = req.user?.id;
-  const email = req.user?.email;
   const otp = String(req.body?.otp || "").trim();
   const newPassword = String(req.body?.newPassword || "");
   const confirmPassword = String(req.body?.confirmPassword || "");
 
-  if (!userId || !email) {
+  if (!userId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 

@@ -105,7 +105,14 @@ export const uploadAvatar = async (req, res, next) => {
 export const fetchBanks = async (req, res) => {
     try {
         const banks = await getBanks();
-        res.json(banks);
+        const seenCodes = new Set();
+        const uniqueBanks = (banks || []).filter((bank) => {
+            const code = String(bank?.code || "").trim();
+            if (!code || seenCodes.has(code)) return false;
+            seenCodes.add(code);
+            return true;
+        });
+        res.json(uniqueBanks);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -166,6 +173,11 @@ export const saveAccount = async (req, res) => {
             .single();
         if (profileErr) throw profileErr;
         if (!profile) return res.status(404).json({ error: "User profile not found" });
+        if (!profile.full_name || !profile.full_name.trim()) {
+            return res.status(400).json({
+                error: "Add your full name to your profile before linking a bank account",
+            });
+        }
         // i need to end this function if the user is yet to verify their identity
 
         // 2️⃣ Verify account with provider
