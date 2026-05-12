@@ -209,32 +209,37 @@ export const getCollectionDashboardStats = async (req, res) => {
 export const collectionActivities = async (req, res) => {
     const user_id = req.user.id;
 
-    // Fetch user contributors activities from the database
     try {
-        const { data, error } = await supabase
+        const { data: collections, error: collectionsError } = await supabase
             .from('collections')
-            .select('*')
+            .select('id')
             .eq('user_id', user_id)
-            .limit(10) // Limit to recent 10 activities
             .order('created_at', { ascending: false })
 
-        if (error) throw error;
+        if (collectionsError) throw collectionsError;
 
-        // use the collections to fetch related data from the cotributors tables
-        const activities = [];
-        for (const collection of data) {
-            const { data: contributorsData, error: contributorsError } = await supabase
-                .from('contributions')
-                .select('*')
-                .eq('collection_id', collection.id)
-                .eq('status', 'paid')
-                .limit(5) // Limit to recent 5 contributions per collection
-                .order('created_at', { ascending: false });
-            if (contributorsError) throw contributorsError;
-            activities.push(...contributorsData);
+        const collectionIds = (collections || []).map((collection) => collection.id);
+        if (collectionIds.length === 0) {
+            return res.status(200).json({
+                message: 'User activities fetched successfully',
+                data: [],
+            });
         }
-        res.status(200).json({ message: 'User activities fetched successfully', data: activities });
 
+        const { data: activities, error: activitiesError } = await supabase
+            .from('contributions')
+            .select('*')
+            .in('collection_id', collectionIds)
+            .eq('status', 'paid')
+            .order('created_at', { ascending: false })
+            .limit(50);
+
+        if (activitiesError) throw activitiesError;
+
+        res.status(200).json({
+            message: 'User activities fetched successfully',
+            data: activities || [],
+        });
 
     } catch (err) {
         console.log(err);
