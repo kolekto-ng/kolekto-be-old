@@ -198,22 +198,11 @@ export const createCollection = async (req, res) => {
         };
     }
 
-    if (collection_type === "fundraising") {
-        if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
-            return res.status(400).json({ message: "Amount must be greater than ₦100 for fundraising collections" });
-        }
-        collectionType = "fundraising"; // fundraising uses fixed amount per contribution
-        fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
-        amountBreakdown = {
-            type: "fundraising",
-            amount: parsedAmount,
-            fee_bearer: "contributor",
-            platformFee: 0.01,
-            paymentGatewayFee: 0.015,
-            totalFees: 0.025,
-        };
-
-    }
+    // The fundraising branch above (around line 76) already validates `amount`
+    // and seeds `amountBreakdown`. A duplicate block lived here that re-ran
+    // the same logic but with `parsedAmount` (which is `null` until further
+    // down for the fundraising path) — producing a half-populated breakdown
+    // that overrode the correct one. Removed.
 
     try {
         // ------------------------

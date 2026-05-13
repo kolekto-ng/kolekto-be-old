@@ -1,3 +1,7 @@
+// ⚠️ DEPRECATED — DO NOT IMPORT / MOUNT
+// CommonJS in an ESM project; never registered in app.js (grep verified).
+// Treats the (non-class) UserController as constructable. Delete in a
+// follow-up cleanup PR.
 // src/routes/userRoutes.js
 const express = require('express');
 const UserController = require('../controllers/userController');

@@ -1,5 +1,20 @@
 // =============================================================================
-// KYC BACKEND API IMPLEMENTATION (Node.js/Express)
+// ⚠️  DEPRECATED — DO NOT IMPORT  ⚠️
+// =============================================================================
+// This file is a CommonJS implementation that targets a Postgres + pg/bcrypt/
+// sharp stack that is NOT installed in this project (this is an ESM Supabase
+// project — see package.json `"type": "module"`).
+//
+// It is **not imported anywhere** (grep verified: zero hits for
+// `kyc-backend-api` across the repo). Importing it would crash at module load
+// because:
+//   - `require` is unavailable in ESM
+//   - `pg`, `sharp`, `bcrypt` are not in dependencies
+//   - it has two `module.exports` (lines 839 & 1034)
+//   - it schedules cron jobs on module load
+//
+// The real KYC endpoints live in `controllers/settings/kyc.js` and
+// `controllers/admin/kyc.js`. Delete this file in a follow-up cleanup PR.
 // =============================================================================
 
 const express = require('express');

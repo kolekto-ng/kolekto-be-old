@@ -83,12 +83,9 @@ export const signUp = async (req, res) => {
 
     try {
         if (type === "v3") {
-            console.log(process.env.RECAPTCHA_V3_SECRET, token);
-
             const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V3_SECRET}&response=${token}`;
             const response = await fetch(verifyUrl, { method: "POST" });
             const data = await response.json();
-            console.log(data, "recapcha data");
             if (!data.success || data.score < 0.5) {
                 return res.json({ requireV2: true }); // fallback
             }
@@ -99,7 +96,6 @@ export const signUp = async (req, res) => {
             const verifyUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_V2_SECRET}&response=${token}`;
             const response = await fetch(verifyUrl, { method: "POST" });
             const data = await response.json();
-            console.log(data, 'v2 data');
             if (!data.success) {
                 return res.status(400).json({ message: "Failed v2 verification" });
             }
@@ -152,9 +148,19 @@ export const signOut = async (req, res) => {
     try {
         const { error } = await supabase.auth.signOut();
 
-        // Clear cookies
-        res.clearCookie('access_token');
-        res.clearCookie('refresh_token');
+        // Cookies were set in signIn with sameSite/secure/domain/path options.
+        // Cookies are only cleared when ALL of those options match — otherwise
+        // the browser leaves the original cookie in place. Use the same
+        // options here so production cookies actually disappear on logout.
+        const cookieOptions = {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'none',
+            path: '/',
+            domain: process.env.NODE_ENV === 'production' ? '.kolekto.com.ng' : undefined,
+        };
+        res.clearCookie('access_token', cookieOptions);
+        res.clearCookie('refresh_token', cookieOptions);
 
         if (error) {
             return res.status(400).json({ error: error.message });

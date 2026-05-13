@@ -223,20 +223,80 @@ export const verifyOtpAndChangePassword = async (req, res) => {
       return res.status(400).json({ error: "Invalid OTP" });
     }
 
+    // Update the password using the Supabase Admin API.
+    //
+    // Previous attempt used a per-request anon-key client with the user's
+    // JWT in `global.headers.Authorization` and called `auth.updateUser`.
+    // That fails with "Auth session missing!" because supabase-js's
+    // `updateUser` reads from the client's internal session state (set via
+    // `setSession`) — it does NOT honour `global.headers` for the session
+    // lookup. Since we don't have the user's refresh_token on the server,
+    // we can't call `setSession` either.
+    //
+    // The admin API (updateUserById) is the correct path and only requires
+    // SUPABASE_SERVICE_ROLE_KEY in the backend env. The shared client in
+    // utils/client.js picks that up automatically.
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      console.error(
+        "verifyOtpAndChangePassword: SUPABASE_SERVICE_ROLE_KEY is not configured — admin password update will fail. Set this env var in the backend."
+      );
+      return res.status(500).json({
+        error: "Password change is temporarily unavailable. Please contact support.",
+        code: "ADMIN_KEY_MISSING",
+      });
+    }
+
     const { data: updateRes, error: updateErr } = await supabase.auth.admin.updateUserById(userId, {
       password: newPassword,
     });
 
     if (updateErr) {
-      console.error("supabase updateUserById error:", updateErr);
-      return res.status(500).json({ error: "Failed to update password" });
+      // Log structured detail; surface a useful (but sanitised) message.
+      console.error("supabase updateUser error:", {
+        message: updateErr.message,
+        status: updateErr.status,
+        name: updateErr.name,
+      });
+      const raw = String(updateErr.message || "").toLowerCase();
+      let userMessage = updateErr.message || "Failed to update password";
+      let httpStatus = 500;
+      if (raw.includes("password") && (raw.includes("weak") || raw.includes("short") || raw.includes("requirements"))) {
+        userMessage = "Password does not meet the required strength. Use at least 8 characters with a mix of letters and numbers.";
+        httpStatus = 400;
+      } else if (raw.includes("rate") || raw.includes("too many")) {
+        userMessage = "Too many attempts. Please wait a moment and try again.";
+        httpStatus = 429;
+      } else if (raw.includes("invalid") && raw.includes("jwt")) {
+        userMessage = "Your session has expired. Please sign in again and retry.";
+        httpStatus = 401;
+      } else if (raw.includes("not allowed") || raw.includes("insufficient") || raw.includes("forbidden")) {
+        userMessage = "Password change is temporarily unavailable. Please contact support.";
+        httpStatus = 500;
+      }
+      return res.status(httpStatus).json({
+        error: userMessage,
+        code: updateErr.name || "PASSWORD_UPDATE_FAILED",
+      });
     }
 
     await supabase.from("password_change_otps").update({ used_at: new Date().toISOString() }).eq("id", record.id);
 
-    return res.status(200).json({ success: true, userId: updateRes?.user?.id || userId });
+    // Supabase invalidates the user's active sessions on password change.
+    // Signal this to the frontend so it can prompt for a fresh login instead
+    // of letting the user discover it via the next 401.
+    return res.status(200).json({
+      success: true,
+      userId: updateRes?.user?.id || userId,
+      sessionInvalidated: true,
+    });
   } catch (err) {
-    console.error("verifyOtpAndChangePassword error:", err);
-    return res.status(500).json({ error: "Failed to change password" });
+    console.error("verifyOtpAndChangePassword error:", {
+      message: err?.message,
+      name: err?.name,
+    });
+    return res.status(500).json({
+      error: err?.message || "Failed to change password",
+      code: "PASSWORD_CHANGE_UNEXPECTED",
+    });
   }
 };

@@ -215,10 +215,14 @@ export function computeWalletBalances(paidContributions, withdrawals) {
     // Settled = net amounts from payments made BEFORE the cutoff
     const settledNet = roundCurrency(netPayment - pendingBalance);
 
-    // Completed withdrawals (irreversible)
+    // Completed withdrawals (irreversible).
+    // "approved" is the status the admin panel writes when the admin marks
+    // a manual withdrawal as paid out. Legacy values ("success", "successful",
+    // "completed") are preserved for backwards compatibility with rows that
+    // were processed via the old Paystack-transfer flow.
     const completedWithdrawals = roundCurrency(
         (withdrawals || [])
-            .filter((row) => ["completed", "successful", "success"].includes(String(row.status || "")))
+            .filter((row) => ["completed", "successful", "success", "approved"].includes(String(row.status || "")))
             .reduce((sum, row) => sum + Number(row.amount || 0), 0)
     );
 
