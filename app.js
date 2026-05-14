@@ -21,7 +21,6 @@ import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT 
 // before the global JSON parser. See B-1 below.
 import { handleWebhook } from "./controllers/deposit.js";
 const app = express();
-
 app.use(helmet());
 
 const corsOptions = {
