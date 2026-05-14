@@ -113,14 +113,33 @@ async function runDailySettlement() {
 /**
  * Schedule: 4:00 AM UTC daily = 5:00 AM WAT (Nigeria Time).
  * Cron syntax: "0 4 * * *" = minute=0, hour=4, every day.
+ *
+ * B-8: Single-replica gate.
+ *   Previously this scheduled the cron at module-load time, so every backend
+ *   replica scheduled its own daily run. With N replicas, the wallet recompute
+ *   fires N times in close succession at 5am WAT — wasteful at best, and on
+ *   any future non-idempotent change a real correctness risk.
+ *
+ *   We now schedule only when RUN_SETTLEMENT_CRON=true. Set this on EXACTLY
+ *   ONE replica (the "leader"). On other replicas it stays disabled.
+ *
+ *   The export `runDailySettlement` is still available for manual triggers
+ *   (admin endpoint, scripts) regardless of the env flag.
  */
-cron.schedule("0 4 * * *", () => {
-    runDailySettlement().catch((err) => {
-        console.error("[settlement] Unhandled error in settlement job:", err?.message || err);
+if (process.env.RUN_SETTLEMENT_CRON === "true") {
+    cron.schedule("0 4 * * *", () => {
+        runDailySettlement().catch((err) => {
+            console.error("[settlement] Unhandled error in settlement job:", err?.message || err);
+        });
     });
-});
-
-console.log("[settlement] T+1 settlement job scheduled — runs daily at 5:00 AM WAT (4:00 AM UTC)");
+    console.log(
+        "[settlement] T+1 settlement job scheduled — runs daily at 5:00 AM WAT (4:00 AM UTC)"
+    );
+} else {
+    console.log(
+        "[settlement] cron NOT scheduled — set RUN_SETTLEMENT_CRON=true on exactly ONE replica to enable. The runDailySettlement export remains available for manual triggers."
+    );
+}
 
 // Export for manual trigger (e.g. admin endpoint or testing)
 export { runDailySettlement };
