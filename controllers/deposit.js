@@ -14,6 +14,155 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
 
 /**
+ * F1: Invoke the Supabase edge function `verify-paystack-payment`.
+ *
+ * This is the same function the frontend's PaymentCallback calls. We call
+ * it from the webhook as a safety net for payments where the FE never got
+ * a chance to call it (browser closed, mobile tab killed, network drop).
+ *
+ * The edge function is fully idempotent — calling it again for an already-
+ * processed reference is a no-op that just re-derives the receipt.
+ *
+ * Returns { ok: boolean, status: number, body: any }.
+ *
+ * Exported so the F5 admin reconcile endpoint can reuse the same code path.
+ */
+export async function invokeVerifyEdgeFunction(reference) {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey =
+        process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+        return {
+            ok: false,
+            status: 500,
+            body: { error: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY/ANON_KEY missing" },
+        };
+    }
+
+    // Edge functions are reachable at `<supabase-url>/functions/v1/<name>`.
+    // Supabase rejects requests without a valid Bearer (anon or service-role
+    // key). We use service-role for trust + to bypass any RLS gates the
+    // edge function might rely on internally.
+    const url = `${supabaseUrl.replace(/\/+$/, "")}/functions/v1/verify-paystack-payment`;
+
+    // Use a hard timeout to avoid hanging the webhook on a slow edge function.
+    // Paystack's own webhook timeout is ~30s; we cap at 25s.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+    try {
+        const res = await axios.post(
+            url,
+            { reference },
+            {
+                headers: {
+                    Authorization: `Bearer ${supabaseKey}`,
+                    apikey: supabaseKey,
+                    "Content-Type": "application/json",
+                },
+                signal: controller.signal,
+                timeout: 25000,
+                // Tell axios not to throw on non-2xx so we can inspect status.
+                validateStatus: () => true,
+            }
+        );
+        return {
+            ok: res.status >= 200 && res.status < 300,
+            status: res.status,
+            body: res.data,
+        };
+    } catch (err) {
+        return {
+            ok: false,
+            status: 0,
+            body: {
+                error: err?.message || "edge function invocation failed",
+                aborted: err?.name === "CanceledError" || err?.name === "AbortError",
+            },
+        };
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+/**
+ * B-3: Mint the next contributor unique code atomically.
+ *
+ * Primary path: call the Postgres RPC `next_contributor_code_number`
+ * (see database/b3_contributor_code_sequence.sql). The RPC is a single
+ * UPDATE … RETURNING statement, which Postgres serialises automatically —
+ * two concurrent calls cannot produce the same number.
+ *
+ * Fallback path (RPC not yet deployed): use MAX(numeric_suffix)+1 instead
+ * of the previous COUNT(*)+1. This is still racy but far less likely to
+ * collide because we look at the largest existing suffix instead of the
+ * row count, and it lets the code ship before the SQL migration is run.
+ * A clear console.warn is logged when the fallback fires so ops can see
+ * the migration hasn't been applied.
+ *
+ * Returns: padded numeric string (e.g. "001", "042", "1234"). The caller
+ * prefixes it with collection.code_prefix.
+ */
+async function nextContributorCodeNumber(collectionId, codePrefix) {
+    // Primary: atomic RPC
+    try {
+        const { data, error } = await supabase
+            .rpc("next_contributor_code_number", { p_collection_id: collectionId });
+        if (!error && data != null) {
+            const num = typeof data === "number"
+                ? data
+                : Array.isArray(data) && data.length > 0
+                    ? Number(data[0]?.next_contributor_code_number ?? data[0])
+                    : Number(data);
+            if (Number.isFinite(num) && num > 0) {
+                return String(num).padStart(3, "0");
+            }
+        }
+        if (error) {
+            console.warn(
+                "[nextContributorCodeNumber] RPC not available — falling back to MAX+1. " +
+                "Apply database/b3_contributor_code_sequence.sql to remove this fallback.",
+                { code: error.code, message: error.message }
+            );
+        }
+    } catch (rpcErr) {
+        console.warn(
+            "[nextContributorCodeNumber] RPC threw — falling back to MAX+1:",
+            rpcErr?.message
+        );
+    }
+
+    // Fallback: derive the next number from the largest existing suffix that
+    // matches this collection's code_prefix. Still racy under concurrent
+    // writes but better than COUNT(*)+1, and ONLY runs if the RPC is missing.
+    try {
+        const { data: rows } = await supabase
+            .from("contributions")
+            .select("contributor_unique_code")
+            .eq("collection_id", collectionId)
+            .not("contributor_unique_code", "is", null);
+        let maxNum = 0;
+        const prefix = String(codePrefix || "");
+        for (const r of rows || []) {
+            const code = String(r.contributor_unique_code || "");
+            const tail = prefix && code.startsWith(prefix) ? code.slice(prefix.length) : code;
+            const n = parseInt(tail, 10);
+            if (Number.isFinite(n) && n > maxNum) maxNum = n;
+        }
+        return String(maxNum + 1).padStart(3, "0");
+    } catch (fallbackErr) {
+        console.error(
+            "[nextContributorCodeNumber] both RPC and fallback failed:",
+            fallbackErr?.message
+        );
+        // Last resort: timestamp-based so we still produce a unique-looking
+        // code rather than skipping the field entirely.
+        return String(Date.now() % 100000).padStart(5, "0");
+    }
+}
+
+/**
  * Validate the client-supplied contribution amount against collection settings.
  *
  * Returns null when the amount is valid, or an error string when it is not.
@@ -108,92 +257,129 @@ const paystackHeaders = {
 };
 
 /**
- * Recomputes and persists all wallet balances for a collection from the source of
- * truth (contributions + withdrawals tables). Called after every successful payment.
+ * Recomputes and persists all wallet balances for a collection from the
+ * SOURCE OF TRUTH (contributions + withdrawals tables).
+ *
+ * B-2: This used to be a read-modify-write that ADDED `netToAdd` to the
+ * existing wallet row each call. Because both verifyPayment AND the Paystack
+ * webhook ran this function for the same deposit, the wallet was
+ * double-credited whenever both paths completed in the same window. Daily
+ * 5am-WAT cron eventually corrected drift via the same source-of-truth math,
+ * but the window allowed withdrawals against money that didn't exist yet.
+ *
+ * The new implementation is IDEMPOTENT: running it twice (or N times) for
+ * the same deposit yields the same wallet row. We mirror the proven pattern
+ * from controllers/withdrawal.js#refreshWallet (which has been correct from
+ * day one) by calling utils/financial.js#computeWalletBalances on the live
+ * contributions+withdrawals rows.
+ *
+ * The function signature is preserved (collectionId, grossAmountPaid) so
+ * callers do not need to change. The grossAmountPaid arg is now used only
+ * for logging — the actual numbers come from the database.
  *
  * Balance rules (see utils/financial.js for full definitions):
- *   - net_payment (Total Raised) = sum of contribution.amount — NEVER includes fees
- *   - pending_balance = net amounts received today (after 5am WAT) — not withdrawable yet
- *   - available_balance = settled net amounts minus completed withdrawals
- *   - ledger_balance = available + pending (total funds remaining)
- *   - Fees are stored separately; they are never mixed into any balance field
+ *   - net_payment (Total Raised) = sum of paid contribution.amount
+ *   - gross_payment              = sum of contribution.gross_amount (with fees)
+ *   - pending_balance            = net amounts after the 5am WAT cutoff
+ *   - available_balance          = settled net minus completed withdrawals
+ *   - ledger_balance             = available + pending
+ *   - withdrawn                  = sum of completed/approved withdrawals
  */
 export async function updateWalletStats(collectionId, grossAmountPaid) {
-    if (!collectionId || !grossAmountPaid || grossAmountPaid <= 0) return;
+    if (!collectionId) return;
 
-    console.log(`[updateWalletStats] collectionId=${collectionId}, grossAmountPaid=${grossAmountPaid}`);
+    console.log(
+        `[updateWalletStats] (source-of-truth) collectionId=${collectionId}` +
+        (grossAmountPaid ? `, triggeredBy=₦${grossAmountPaid}` : "")
+    );
+
     try {
-        const [walletResult, collectionResult] = await Promise.all([
-            // Support duplicate wallet rows by always taking the latest.
-            supabase
-                .from("wallets")
-                .select("*")
-                .eq("collection_id", collectionId)
-                .order("updated_at", { ascending: false })
-                .limit(1)
-                .maybeSingle(),
-            // Some environments use `collection_type` while older code used `type`.
-            supabase.from("collections").select("fee_bearer, collection_type, type").eq("id", collectionId).single()
-        ]);
+        // Locate the wallet for this collection. If a collection has multiple
+        // wallet rows (legacy data), pick the most recently updated one — the
+        // existing wallet.js#getCollectionWallet uses the same strategy.
+        const { data: wallet, error: walletError } = await supabase
+            .from("wallets")
+            .select("id")
+            .eq("collection_id", collectionId)
+            .order("updated_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
 
-        const { data: wallet, error: walletError } = walletResult;
-        const { data: collection, error: collectionError } = collectionResult;
-        if (walletError || !wallet || collectionError || !collection) return;
-
-        let netToAdd = Number(grossAmountPaid);
-        console.log(wallet.fee_breakdown?.tiers || [], collection, "<< wallet and collection details");
-
-        const collectionType = collection.collection_type || collection.type;
-
-        if (collectionType === "fixed") {
-            const fees = Number(wallet?.fee_breakdown?.totalFees || 0);
-            netToAdd = Number(grossAmountPaid) - fees;
-            if (netToAdd < 0) netToAdd = 0;
-        } else if (collectionType === "tiered") {
-            const tierObj = wallet.fee_breakdown?.tiers?.find(t => t.totalPayable === netToAdd);
-            const tierFees = Number(tierObj?.totalFees || 0);
-            netToAdd = Math.max(Number(grossAmountPaid) - tierFees, 0);
-        } else if (collectionType === "fundraising") {
-            const fees = 1.025;
-            netToAdd = parseFloat((grossAmountPaid / fees).toFixed(2));
+        if (walletError || !wallet) {
+            console.warn(
+                `[updateWalletStats] wallet not found for collection ${collectionId}`,
+                walletError?.message
+            );
+            return;
         }
 
-        const newGrossPayment = Number(wallet.gross_payment || 0) + Number(grossAmountPaid);
-        const newNetPayment = Number(wallet.net_payment || 0) + netToAdd;
-        const newPendingBalance = Number(wallet.pending_balance || 0) + netToAdd;
-        const newLedgerBalance = Number(wallet.ledger_balance || 0) + netToAdd;
+        // Pull everything we need to compute the canonical balances.
+        const [
+            { data: contributions, error: contribError },
+            { data: withdrawals, error: withError },
+        ] = await Promise.all([
+            supabase
+                .from("contributions")
+                .select("amount, gross_amount, created_at")
+                .eq("collection_id", collectionId)
+                .eq("status", "paid"),
+            supabase
+                .from("withdrawals")
+                .select("amount, status")
+                .eq("collection_id", collectionId),
+        ]);
 
-        await supabase
+        if (contribError || withError) {
+            console.error(
+                "[updateWalletStats] source fetch failed:",
+                (contribError || withError)?.message
+            );
+            return;
+        }
+
+        const balances = computeWalletBalances(contributions || [], withdrawals || []);
+
+        const { error: updateError } = await supabase
             .from("wallets")
             .update({
-                gross_payment: newGrossPayment,
-                net_payment: newNetPayment,
-                pending_balance: newPendingBalance,
-                ledger_balance: newLedgerBalance,
-                updated_at: new Date()
+                gross_payment: balances.grossPayment,
+                net_payment: balances.netPayment,
+                pending_balance: balances.pendingBalance,
+                available_balance: balances.availableBalance,
+                ledger_balance: balances.ledgerBalance,
+                withdrawn: balances.completedWithdrawals,
+                updated_at: new Date().toISOString(),
             })
             .eq("id", wallet.id);
 
-        const { data: currentCollection } = await supabase
-            .from("collections")
-            .select("total_contributions")
-            .eq("id", collectionId)
-            .single();
+        if (updateError) {
+            console.error(
+                "[updateWalletStats] wallet write failed:",
+                updateError.message
+            );
+            return;
+        }
 
+        // Keep collections.total_contributions in sync with the paid count.
+        // Idempotent: derived from the same source-of-truth array we just
+        // computed balances from.
+        const paidCount = (contributions || []).length;
         await supabase
             .from("collections")
             .update({
-                total_contributions: (currentCollection?.total_contributions || 0) + 1,
+                total_contributions: paidCount,
                 updated_at: new Date().toISOString(),
             })
             .eq("id", collectionId);
 
-        console.log(`[updateWalletStats] ✅ Wallet updated for ${collectionId}:`, {
-            netContribution: netToAdd,
-            netPayment: newNetPayment,
-            pendingBalance: newPendingBalance,
-            availableBalance: Math.max(0, newLedgerBalance - newPendingBalance),
-            ledgerBalance: newLedgerBalance,
+        console.log(`[updateWalletStats] ✅ Wallet recomputed for ${collectionId}:`, {
+            paidContributions: paidCount,
+            netPayment: balances.netPayment,
+            grossPayment: balances.grossPayment,
+            pending: balances.pendingBalance,
+            available: balances.availableBalance,
+            ledger: balances.ledgerBalance,
+            withdrawn: balances.completedWithdrawals,
         });
     } catch (err) {
         console.error("[updateWalletStats] Unexpected error:", err?.message || err);
@@ -418,7 +604,10 @@ export const initializePayment = async (req, res) => {
             console.error("Init email error:", err?.message || err);
         }
 
-        console.log(`✅ Payment initialized | ${collectionId} | net=₦${netAmount} | payable=₦${totalPayable}`);
+        // F4: structured log for end-to-end correlation
+        console.log(
+            `[initiate-be ref=${paystackData.reference}] PAYMENT_INITIATED collectionId=${collectionId} netAmount=${netAmount} totalPayable=${totalPayable} feeBearer=${feeBearer} type=${collType}`
+        );
 
         res.status(200).json({
             message: "Payment initialized successfully",
@@ -465,6 +654,9 @@ export const verifyPayment = async (req, res) => {
     if (!reference) {
         return res.status(400).json({ error: "Reference is required" });
     }
+
+    // F4: correlation log
+    console.log(`[verify-be ref=${reference}] VERIFY_CALLED`);
 
     const { data: existingDeposit, error: fetchError } = await supabase
         .from("deposits")
@@ -587,6 +779,8 @@ export const verifyPayment = async (req, res) => {
 
     // Already successful — return cached data and resend confirmation if needed
     if (existingDeposit.status === "success") {
+        // F4: hit the idempotent path
+        console.log(`[verify-be ref=${reference}] VERIFY_IDEMPOTENT_HIT depositId=${existingDeposit.id}`);
         const [{ data: contributor }, { data: collection }] = await Promise.all([
             supabase
                 .from("contributions")
@@ -696,6 +890,10 @@ export const verifyPayment = async (req, res) => {
         );
 
         const paystackData = response.data.data;
+        // F4: Paystack verification outcome
+        console.log(
+            `[verify-be ref=${reference}] VERIFY_PAYSTACK_RESULT status=${paystackData?.status} amount=${paystackData?.amount}`
+        );
 
         const { data: deposit, error: depositError } = await supabase
             .from("deposits")
@@ -722,14 +920,12 @@ export const verifyPayment = async (req, res) => {
                 .eq("id", deposit.collection_id)
                 .single();
 
-            const { count } = await supabase
-                .from("contributions")
-                .select("id", { count: "exact", head: true })
-                .eq("collection_id", deposit.collection_id)
-                .eq("status", "paid");
-
+            // B-3: atomic per-collection counter via the Postgres RPC.
             if (collection?.code_prefix) {
-                const nextNumber = String((count || 0) + 1).padStart(3, "0");
+                const nextNumber = await nextContributorCodeNumber(
+                    deposit.collection_id,
+                    collection.code_prefix
+                );
                 const uniqueCode = `${collection.code_prefix}${nextNumber}`;
                 await supabase
                     .from("contributions")
@@ -756,6 +952,10 @@ export const verifyPayment = async (req, res) => {
             // ── Step 2: Update wallet AFTER contribution is marked paid ──────────
             if (deposit.collection_id && deposit.amount > 0) {
                 await updateWalletStats(deposit.collection_id, deposit.amount);
+                // F4: wallet recompute checkpoint
+                console.log(
+                    `[verify-be ref=${reference}] WALLET_UPDATED collectionId=${deposit.collection_id}`
+                );
             }
 
             // Send contributor confirmation exactly once
@@ -919,6 +1119,9 @@ export const verifyPayment = async (req, res) => {
             },
         };
 
+        // F4: lifecycle complete
+        console.log(`[verify-be ref=${reference}] PAYMENT_COMPLETED`);
+
         return res.status(200).json({
             message: "Payment verification complete",
             payment: deposit,
@@ -928,6 +1131,10 @@ export const verifyPayment = async (req, res) => {
             paystack: paystackData,
         });
     } catch (error) {
+        console.error(`[verify-be ref=${reference}] VERIFY_ERROR`, {
+            message: error?.message,
+            code: error?.code,
+        });
         return res
             .status(500)
             .json({ error: error.response?.data?.message || error.message });
@@ -966,20 +1173,52 @@ export const fetchTransaction = async (req, res) => {
     }
 };
 
-// Verify Paystack webhook signature
+// Verify Paystack webhook signature.
+//
+// B-1: Paystack signs the EXACT bytes of the HTTP body. If express.json()
+// runs before this handler, req.body is a JS object and JSON.stringify(obj)
+// produces different whitespace/key order than the bytes Paystack signed —
+// so the HMAC will never match. The route must be mounted with
+// express.raw() in app.js BEFORE express.json(), which gives us a Buffer here.
+//
+// We assert Buffer-ness defensively below: if we ever receive a parsed
+// object on this code path we log a critical warning and refuse the request,
+// because verifying against a re-serialised object is unsafe.
 async function verifyPaystackSignature(req) {
-    // Prefer raw payload when available (required for Paystack signature validation).
-    const payload = Buffer.isBuffer(req.body)
-        ? req.body.toString("utf8")
-        : JSON.stringify(req.body);
+    if (!Buffer.isBuffer(req.body)) {
+        console.error(
+            "[webhook] req.body is not a Buffer — express.raw() is not wired correctly for /api/payments/webhook. Refusing signature verification."
+        );
+        return false;
+    }
+    // Guard against missing secret key — createHmac throws TypeError if key is undefined
+    if (!PAYSTACK_SECRET_KEY) {
+        console.error("[webhook] PAYSTACK_SECRET_KEY is not set — cannot verify signature. Refusing.");
+        return false;
+    }
+    const payload = req.body.toString("utf8");
     const signature = req.headers["x-paystack-signature"];
+
+    if (!signature) {
+        console.warn("[webhook] missing x-paystack-signature header");
+        return false;
+    }
 
     if (crypto?.createHmac) {
         const hash = crypto
             .createHmac("sha512", PAYSTACK_SECRET_KEY)
             .update(payload)
             .digest("hex");
-        return hash === signature;
+        // timingSafeEqual would be ideal but length-mismatched buffers throw;
+        // both values are hex of the same length when signature is well-formed
+        // so a constant-time compare here is fine.
+        try {
+            const a = Buffer.from(hash, "hex");
+            const b = Buffer.from(String(signature), "hex");
+            return a.length === b.length && crypto.timingSafeEqual(a, b);
+        } catch {
+            return hash === signature;
+        }
     }
 
     const encoder = new TextEncoder();
@@ -999,27 +1238,109 @@ async function verifyPaystackSignature(req) {
 
 // Handle Paystack webhook
 export const handleWebhook = async (req, res) => {
-    const event = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString("utf8")) : req.body;
-    console.log("Webhook event received:", event);
+    // We expect a raw Buffer here (see app.js wiring). Parse defensively so a
+    // future misconfiguration doesn't crash with a JSON.parse error on an
+    // already-parsed object.
+    let event;
+    try {
+        event = Buffer.isBuffer(req.body)
+            ? JSON.parse(req.body.toString("utf8"))
+            : req.body;
+    } catch (parseErr) {
+        console.error("[webhook] failed to parse body:", parseErr?.message);
+        return res.status(400).send("Invalid JSON");
+    }
 
     const isValid = await verifyPaystackSignature(req);
     if (!isValid) {
+        // Log the event type for ops visibility but never the full payload —
+        // it can contain PII / card metadata.
+        console.warn("[webhook] invalid signature for event:", event?.event || "(unknown)");
         return res.status(403).json({ error: "Invalid signature" });
     }
+    console.log("[webhook] received valid event:", event?.event);
 
     if (event.event === "charge.success") {
-        const reference = event.data.reference;
-        console.log("Processing charge.success for reference:", reference);
+        const reference = event.data?.reference;
+        console.log(`[webhook ref=${reference}] WEBHOOK_RECEIVED charge.success`);
 
+        // ── Outer safety net: any unhandled throw returns 500 (Paystack retries)
+        // instead of crashing Express and causing a 502 Bad Gateway.
+        try {
+
+        // ─── F1: Safety-net check #1 ─────────────────────────────────────────
+        try {
+            const { data: existingContribs, error: contribErr } = await supabase
+                .from("contributions")
+                .select("id, status")
+                .eq("payment_reference", reference)
+                .limit(1);
+            if (!contribErr && existingContribs && existingContribs.length > 0) {
+                const anyPaid = existingContribs.some(
+                    (c) => String(c.status || "").toLowerCase() === "paid"
+                );
+                if (anyPaid) {
+                    console.log(
+                        `[webhook ref=${reference}] WEBHOOK_ALREADY_PROCESSED — contribution already paid, no-op`
+                    );
+                    return res
+                        .status(200)
+                        .send("Already processed");
+                }
+            }
+        } catch (lookupErr) {
+            console.warn(
+                `[webhook ref=${reference}] contribution lookup failed (non-fatal):`,
+                lookupErr?.message
+            );
+        }
+
+        // ─── F1: Safety-net check #2 ─────────────────────────────────────────
+        // Try the legacy deposits-table path. This preserves behaviour for any
+        // payment initiated through controllers/deposit.js#initializePayment
+        // (which DOES create a deposits row before calling Paystack).
         const { data: deposit, error: depositError } = await supabase
             .from("deposits")
             .select("*")
             .eq("payment_reference", reference)
             .single();
 
+        // ─── F1: Safety-net check #3 (RECOVERY) ──────────────────────────────
+        // No contributions, no deposit. This means the payment was initiated
+        // via the Supabase edge function `initiate-paystack-payment` AND the
+        // FE callback never reached `verify-paystack-payment` (closed tab,
+        // mobile browser killed, network glitch on return from Paystack).
+        // The contributor's money is at Paystack with no Kolekto-side record.
+        //
+        // We invoke the verify edge function directly — it's idempotent and
+        // identical to the FE path. This is the actual safety net that was
+        // missing before F1.
         if (depositError || !deposit) {
-            console.error("Deposit not found:", reference);
-            return res.status(200).send("Deposit not found");
+            console.log(
+                `[webhook ref=${reference}] WEBHOOK_INVOKED_VERIFY — no contributions or deposits row exists; recovering via edge function`
+            );
+            const invokeResult = await invokeVerifyEdgeFunction(reference);
+            if (invokeResult.ok) {
+                console.log(
+                    `[webhook ref=${reference}] WEBHOOK_VERIFY_RECOVERED status=${invokeResult.status}`
+                );
+                return res.status(200).send("Recovered via edge function");
+            }
+            // Return 500 so Paystack retries — the edge function may have
+            // hit a transient issue (DB error, etc.).
+            console.error(
+                `[webhook ref=${reference}] WEBHOOK_VERIFY_FAILED status=${invokeResult.status}`,
+                {
+                    error: invokeResult.body?.error,
+                    code: invokeResult.body?.code,
+                }
+            );
+            return res.status(500).json({
+                error: "Edge function verification failed",
+                paystack_reference: reference,
+                edge_function_status: invokeResult.status,
+                edge_function_error: invokeResult.body?.error || null,
+            });
         }
 
         // Already processed check happens AFTER we update the deposit.
@@ -1040,7 +1361,9 @@ export const handleWebhook = async (req, res) => {
                 .eq("id", deposit.id);
         }
 
-        if (deposit.contributor_id) {
+        // Guard with !alreadyProcessed: prevents re-running nextContributorCodeNumber
+        // on Paystack retries, which would generate and overwrite the unique code.
+        if (!alreadyProcessed && deposit.contributor_id) {
             // ── Step 1: Mark contribution PAID (wallet depends on this) ──────
             const { data: collection } = await supabase
                 .from("collections")
@@ -1048,14 +1371,12 @@ export const handleWebhook = async (req, res) => {
                 .eq("id", deposit.collection_id)
                 .single();
 
-            const { count } = await supabase
-                .from("contributions")
-                .select("id", { count: "exact", head: true })
-                .eq("collection_id", deposit.collection_id)
-                .eq("status", "paid");
-
+            // B-3: atomic per-collection counter via the Postgres RPC.
             if (collection?.code_prefix) {
-                const nextNumber = String((count || 0) + 1).padStart(3, "0");
+                const nextNumber = await nextContributorCodeNumber(
+                    deposit.collection_id,
+                    collection.code_prefix
+                );
                 const uniqueCode = `${collection.code_prefix}${nextNumber}`;
                 await supabase
                     .from("contributions")
@@ -1166,14 +1487,14 @@ export const handleWebhook = async (req, res) => {
             if (organizerUpdated) {
                 const { data: collection } = await supabase
                     .from("collections")
-                    .select("id, title, organizer_id")
+                    .select("id, title, user_id")   // FIXED: was organizer_id (column does not exist)
                     .eq("id", deposit.collection_id)
                     .single();
 
                 const { data: organizer } = await supabase
                     .from("profiles")
                     .select("id, full_name, email")
-                    .eq("id", collection?.organizer_id)
+                    .eq("id", collection?.user_id)   // FIXED: was organizer_id
                     .single();
 
                 await sendEmail({
@@ -1188,9 +1509,32 @@ export const handleWebhook = async (req, res) => {
             console.error("Organizer notification update error:", e?.message || e);
         }
 
-        console.log(`✅ Webhook processed | Collection: ${deposit.collection_id} | ₦${deposit.amount}`);
-    }
+        // F4: legacy deposits path completed
+        console.log(
+            `[webhook ref=${reference}] WEBHOOK_LEGACY_PROCESSED collectionId=${deposit.collection_id} amount=${deposit.amount}`
+        );
 
+        // ← 200 is now INSIDE the try block — always reached if no throw
+        return res.status(200).send("Webhook received");
+
+        } catch (whErr) {
+            // Catch-all for the entire charge.success processing path.
+            // Returns 500 so Paystack retries — never crashes Express.
+            console.error(`[webhook ref=${reference}] WEBHOOK_UNHANDLED_ERROR`, {
+                message: whErr?.message,
+                stack: whErr?.stack,
+            });
+            return res.status(500).json({
+                error: "Webhook processing failed",
+                ref: reference,
+            });
+        }
+    } // end if charge.success
+
+    // All other event types — always acknowledge with 200
+    console.log(
+        `[webhook ref=${event?.data?.reference || "?"}] WEBHOOK_DONE event=${event?.event || "?"}`
+    );
     res.status(200).send("Webhook received");
 };
 

@@ -418,32 +418,68 @@ export const getAccounts = async (req, res) => {
     }
 };
 
-// Set default account
+// Set default account.
+//
+// SECURITY (B-5): Previously this route read `user_id` from the request
+// body and used it to clear/set defaults — meaning an attacker could pass
+// another user's `user_id` and flip the victim's default payout account.
+// We now ALWAYS use `req.user.id` (set by verifyToken) and ignore any
+// `user_id` the client sends.
 export const setDefaultAccount = async (req, res) => {
-    const { user_id, account_id } = req.body;
+    const user_id = req.user?.id;
+    const { account_id } = req.body || {};
+
+    if (!user_id) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!account_id) {
+        return res.status(400).json({ error: "account_id is required" });
+    }
 
     try {
-        // clear all defaults
+        // Verify ownership of the target account BEFORE any mutation.
+        // Avoids accidentally clearing a user's defaults via an invalid id.
+        const { data: target, error: lookupErr } = await supabase
+            .from("payout_accounts")
+            .select("id, user_id")
+            .eq("id", account_id)
+            .eq("user_id", user_id)
+            .maybeSingle();
+
+        if (lookupErr) throw lookupErr;
+        if (!target) {
+            return res.status(404).json({
+                error: "Account not found or does not belong to you.",
+                code: "PAYOUT_NOT_FOUND",
+            });
+        }
+
+        // Clear all of THIS user's defaults (never anyone else's).
         const { error: clearErr } = await supabase
             .from("payout_accounts")
             .update({ is_default: false })
             .eq("user_id", user_id);
-
         if (clearErr) throw clearErr;
 
-        // set chosen default
+        // Set the chosen default.
         const { data, error } = await supabase
             .from("payout_accounts")
             .update({ is_default: true })
             .eq("id", account_id)
-            .eq("user_id", user_id)
+            .eq("user_id", user_id) // double-guard
             .select()
             .single();
-
         if (error) throw error;
 
-        res.json(data);
+        return res.json(data);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error("setDefaultAccount error:", {
+            message: err?.message,
+            code: err?.code,
+        });
+        return res.status(500).json({
+            error: err?.message || "Failed to set default account",
+            code: err?.code || "SET_DEFAULT_FAILED",
+        });
     }
 };
