@@ -299,8 +299,9 @@ export const getDocuments = async (req, res) => {
         // 1️⃣ Fetch KYC documents for user
         const { data: documents, error: docError } = await supabase
             .from("kyc_documents")
-            .select("id, document_type, verification_type, status, uploaded_at")
-            .eq("user_id", userId);
+            .select("id, document_type, verification_type, status, uploaded_at, rejection_reason")
+            .eq("user_id", userId)
+            .order("uploaded_at", { ascending: false });
 
         if (docError) {
             console.error("DB error (kyc_documents):", docError);
@@ -368,114 +369,114 @@ export const getDocuments = async (req, res) => {
     }
 }
 
-export const saveNIN = async (req, res) => {
-    const userId = req.user?.id;
-    const nin = String(req.body?.nin || "").trim();
+// export const saveNIN = async (req, res) => {
+//     const userId = req.user?.id;
+//     const nin = String(req.body?.nin || "").trim();
 
-    if (!userId) {
-        return res.status(401).json({ error: "Unauthorized" });
-    }
+//     if (!userId) {
+//         return res.status(401).json({ error: "Unauthorized" });
+//     }
 
-    if (!/^\d{11}$/.test(nin)) {
-        return res.status(400).json({ error: "NIN must be 11 digits" });
-    }
+//     if (!/^\d{11}$/.test(nin)) {
+//         return res.status(400).json({ error: "NIN must be 11 digits" });
+//     }
 
-    const keyBuffer = getKeyBuffer();
-    if (!keyBuffer) {
-        return res.status(500).json({ error: "Server misconfigured: missing ACCOUNT_ENCRYPTION_KEY" });
-    }
+//     const keyBuffer = getKeyBuffer();
+//     if (!keyBuffer) {
+//         return res.status(500).json({ error: "Server misconfigured: missing ACCOUNT_ENCRYPTION_KEY" });
+//     }
 
-    const nin_last4 = nin.slice(-4);
-    const nin_hash = sha256(nin);
-    const nin_cipher = encryptSensitive(nin, keyBuffer);
+//     const nin_last4 = nin.slice(-4);
+//     const nin_hash = sha256(nin);
+//     const nin_cipher = encryptSensitive(nin, keyBuffer);
 
-    try {
-        // `user_identity` has required BVN columns in the current schema.
-        // So we must:
-        // - update NIN columns if the row exists
-        // - otherwise insert a row with BVN placeholders (empty strings) and later overwrite them when BVN is submitted
-        const { data: existingIdentity, error: identityFetchErr } = await supabase
-            .from("user_identity")
-            .select("id, bvn_cipher, bvn_hash, bvn_last4")
-            .eq("user_id", userId)
-            .maybeSingle();
+//     try {
+//         // `user_identity` has required BVN columns in the current schema.
+//         // So we must:
+//         // - update NIN columns if the row exists
+//         // - otherwise insert a row with BVN placeholders (empty strings) and later overwrite them when BVN is submitted
+//         const { data: existingIdentity, error: identityFetchErr } = await supabase
+//             .from("user_identity")
+//             .select("id, bvn_cipher, bvn_hash, bvn_last4")
+//             .eq("user_id", userId)
+//             .maybeSingle();
 
-        if (identityFetchErr) {
-            console.error("user_identity fetch error:", identityFetchErr);
-            return res.status(500).json({ error: "Failed to save NIN", details: identityFetchErr.message });
-        }
+//         if (identityFetchErr) {
+//             console.error("user_identity fetch error:", identityFetchErr);
+//             return res.status(500).json({ error: "Failed to save NIN", details: identityFetchErr.message });
+//         }
 
-        let identityErr = null;
-        if (existingIdentity?.id) {
-            const { error } = await supabase
-                .from("user_identity")
-                .update({
-                    nin_cipher,
-                    nin_hash,
-                    nin_last4,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("id", existingIdentity.id);
-            identityErr = error;
-        } else {
-            const { error } = await supabase.from("user_identity").insert([
-                {
-                    user_id: userId,
-                    // BVN placeholders (schema requires these as non-null strings and `bvn_hash` is UNIQUE).
-                    // We generate per-user unique placeholders so NIN can be saved before BVN is submitted,
-                    // without violating the unique constraint.
-                    bvn_cipher: encryptSensitive(`__BVN_PENDING__:${userId}`, keyBuffer),
-                    bvn_hash: sha256(`__BVN_PENDING__:${userId}`),
-                    bvn_last4: "0000",
-                    nin_cipher,
-                    nin_hash,
-                    nin_last4,
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                },
-            ]);
-            identityErr = error;
-        }
+//         let identityErr = null;
+//         if (existingIdentity?.id) {
+//             const { error } = await supabase
+//                 .from("user_identity")
+//                 .update({
+//                     nin_cipher,
+//                     nin_hash,
+//                     nin_last4,
+//                     updated_at: new Date().toISOString(),
+//                 })
+//                 .eq("id", existingIdentity.id);
+//             identityErr = error;
+//         } else {
+//             const { error } = await supabase.from("user_identity").insert([
+//                 {
+//                     user_id: userId,
+//                     // BVN placeholders (schema requires these as non-null strings and `bvn_hash` is UNIQUE).
+//                     // We generate per-user unique placeholders so NIN can be saved before BVN is submitted,
+//                     // without violating the unique constraint.
+//                     bvn_cipher: encryptSensitive(`__BVN_PENDING__:${userId}`, keyBuffer),
+//                     bvn_hash: sha256(`__BVN_PENDING__:${userId}`),
+//                     bvn_last4: "0000",
+//                     nin_cipher,
+//                     nin_hash,
+//                     nin_last4,
+//                     created_at: new Date().toISOString(),
+//                     updated_at: new Date().toISOString(),
+//                 },
+//             ]);
+//             identityErr = error;
+//         }
 
-        if (identityErr) {
-            console.error("user_identity write error:", identityErr);
-            return res.status(500).json({ error: "Failed to save NIN", details: identityErr.message });
-        }
+//         if (identityErr) {
+//             console.error("user_identity write error:", identityErr);
+//             return res.status(500).json({ error: "Failed to save NIN", details: identityErr.message });
+//         }
 
-        // Ensure a KYC verification record exists for admin workflow.
-        const { data: existingKyc, error: kycFetchErr } = await supabase
-            .from("kyc_verifications")
-            .select("id")
-            .eq("user_id", userId)
-            .maybeSingle();
+//         // Ensure a KYC verification record exists for admin workflow.
+//         const { data: existingKyc, error: kycFetchErr } = await supabase
+//             .from("kyc_verifications")
+//             .select("id")
+//             .eq("user_id", userId)
+//             .maybeSingle();
 
-        if (kycFetchErr) {
-            console.error("kyc_verifications fetch error:", kycFetchErr);
-            return res.status(500).json({ error: "Failed to update KYC status" });
-        }
+//         if (kycFetchErr) {
+//             console.error("kyc_verifications fetch error:", kycFetchErr);
+//             return res.status(500).json({ error: "Failed to update KYC status" });
+//         }
 
-        if (!existingKyc) {
-            const { error: kycInsertErr } = await supabase
-                .from("kyc_verifications")
-                .insert([{ user_id: userId, status: "pending", nin_verified: false }]);
-            if (kycInsertErr) {
-                console.error("kyc_verifications insert error:", kycInsertErr);
-                return res.status(500).json({ error: "Failed to create KYC verification record" });
-            }
-        } else {
-            const { error: kycUpdateErr } = await supabase
-                .from("kyc_verifications")
-                .update({ status: "pending", nin_verified: false, updated_at: new Date().toISOString() })
-                .eq("id", existingKyc.id);
-            if (kycUpdateErr) {
-                console.error("kyc_verifications update error:", kycUpdateErr);
-                return res.status(500).json({ error: "Failed to update KYC verification record" });
-            }
-        }
+//         if (!existingKyc) {
+//             const { error: kycInsertErr } = await supabase
+//                 .from("kyc_verifications")
+//                 .insert([{ user_id: userId, status: "pending", nin_verified: false }]);
+//             if (kycInsertErr) {
+//                 console.error("kyc_verifications insert error:", kycInsertErr);
+//                 return res.status(500).json({ error: "Failed to create KYC verification record" });
+//             }
+//         } else {
+//             const { error: kycUpdateErr } = await supabase
+//                 .from("kyc_verifications")
+//                 .update({ status: "pending", nin_verified: false, updated_at: new Date().toISOString() })
+//                 .eq("id", existingKyc.id);
+//             if (kycUpdateErr) {
+//                 console.error("kyc_verifications update error:", kycUpdateErr);
+//                 return res.status(500).json({ error: "Failed to update KYC verification record" });
+//             }
+//         }
 
-        return res.status(200).json({ success: true, nin_last4 });
-    } catch (err) {
-        console.error("saveNIN error:", err);
-        return res.status(500).json({ error: err?.message || "Failed to save NIN" });
-    }
-};
+//         return res.status(200).json({ success: true, nin_last4 });
+//     } catch (err) {
+//         console.error("saveNIN error:", err);
+//         return res.status(500).json({ error: err?.message || "Failed to save NIN" });
+//     }
+// };
