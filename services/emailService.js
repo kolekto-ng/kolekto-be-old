@@ -14,7 +14,7 @@ const createTransporter = () => {
             pass: process.env.ZOHO_APP_PASSWORD, // Zoho App Password (not your regular password)
         },
         tls: {
-            rejectUnauthorized: false // For development, set to true in production
+            rejectUnauthorized: true // For development, set to true in production
         }
     });
 };
