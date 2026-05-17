@@ -15,7 +15,7 @@ const paystackApi = axios.create({
 export async function getBanks() {
     try {
         const res = await paystackApi.get("/bank", {
-            params: { currency: "NGN" },
+            params: { currency: "NGN"},
         });
 
         if (!res.data.status) {

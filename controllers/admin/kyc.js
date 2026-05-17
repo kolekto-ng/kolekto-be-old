@@ -144,7 +144,7 @@ export const getKycVerifications = async (req, res) => {
             .from("kyc_verifications")
             .select("*")
             .order("updated_at", { ascending: false });
-
+        console.log(kycs)
         if (kycError) throw kycError;
 
         // 2. Fetch all profiles for those user_ids
@@ -165,6 +165,7 @@ export const getKycVerifications = async (req, res) => {
                 bank_verified: k.bank_verified || false,
                 identity_verified: k.identity_verified || false,
                 address_verified: k.address_verified || false,
+                selfie_verified: k.selfie_verified || false,
             };
 
             // Count verified items
@@ -233,17 +234,28 @@ export const getSingleKycVerification = async (req, res) => {
             if (fileRows?.length > 0) {
                 const filesWithUrls = await Promise.all(
                     fileRows.map(async (file) => {
-                        console.log(file)
-                        const { data: signedUrlData, error: signedUrlError } = await supabase.storage
-                            .from("kyc-documents") // <-- replace with your actual storage bucket name
-                            .createSignedUrl(file.file_path, 60 * 60); // 1 hour expiry
-                        console.log(signedUrlData)
-                        if (signedUrlError) {
-                            console.error("Error generating signed URL:", signedUrlError);
-                            return { ...file, signed_url: null };
-                        }
+                        // Generate a public URL as fallback
+                        const { data: publicUrlData } = supabase.storage
+                            .from("kyc-documents")
+                            .getPublicUrl(file.file_path);
+                        
+                        const publicUrl = publicUrlData?.publicUrl || null;
 
-                        return { ...file, signed_url: signedUrlData.signedUrl };
+                        try {
+                            const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+                                .from("kyc-documents")
+                                .createSignedUrl(file.file_path, 60 * 60); // 1 hour expiry
+
+                            if (signedUrlError) {
+                                console.error(`Error generating signed URL for ${file.file_path}:`, signedUrlError);
+                                return { ...file, signed_url: null, public_url: publicUrl };
+                            }
+
+                            return { ...file, signed_url: signedUrlData?.signedUrl || null, public_url: publicUrl };
+                        } catch (err) {
+                            console.error(`Exception generating signed URL for ${file.file_path}:`, err);
+                            return { ...file, signed_url: null, public_url: publicUrl };
+                        }
                     })
                 );
 
@@ -256,37 +268,47 @@ export const getSingleKycVerification = async (req, res) => {
         const addressDocs = [];
         const bankDocs = [];
         const bvnDocs = [];
+        const selfieDocs = [];
 
         for (const doc of documents || []) {
             const docFiles = files
                 .filter(f => f.document_id === doc.id)
                 .map(f => ({
-                    id: doc.id,
-                    type: doc.verification_type,
-                    documentType: doc.document_type,
-                    status: doc.status,
-                    rejectionReason: doc.rejection_reason,
-                    verifiedBy: doc.verified_by,
-                    verifiedAt: doc.verified_at,
                     uploadedAt: f.uploaded_at,
-                    fileUrl: f.signed_url || f.file_path, // Prefer signed URL if available
+                    fileUrl: f.signed_url || f.public_url || f.file_path, // Fallback chain
                     fileSize: f.file_size,
-                    fileName: f.file_name
+                    fileName: f.file_name,
+                    fileType: f.file_type
                 }));
+
+            const documentGroup = {
+                id: doc.id,
+                type: doc.verification_type,
+                documentType: doc.document_type,
+                status: doc.status,
+                rejectionReason: doc.rejection_reason,
+                verifiedBy: doc.verified_by,
+                verifiedAt: doc.verified_at,
+                uploadedAt: docFiles.length > 0 ? docFiles[0].uploadedAt : null,
+                files: docFiles
+            };
 
             // Group by document type
             switch (doc.document_type) {
                 case "identity":
-                    identityDocs.push(...docFiles);
+                    identityDocs.push(documentGroup);
                     break;
                 case "address":
-                    addressDocs.push(...docFiles);
+                    addressDocs.push(documentGroup);
                     break;
                 case "bank":
-                    bankDocs.push(...docFiles);
+                    bankDocs.push(documentGroup);
                     break;
                 case "bvn":
-                    bvnDocs.push(...docFiles);
+                    bvnDocs.push(documentGroup);
+                    break;
+                case "selfie":
+                    selfieDocs.push(documentGroup);
                     break;
             }
         }
@@ -310,6 +332,7 @@ export const getSingleKycVerification = async (req, res) => {
             bank_verified: kyc.bank_verified || false,
             identity_verified: kyc.identity_verified || false,
             address_verified: kyc.address_verified || false,
+            selfie_verified: kyc.selfie_verified || false,
         };
 
         const verifiedCount = Object.values(verificationStatus).filter(Boolean).length;
@@ -354,6 +377,11 @@ export const getSingleKycVerification = async (req, res) => {
                 status: kyc.bvn_verified ? "verified" : (bvnDocs.length > 0 ? bvnDocs[0].status : "pending"),
                 verified: kyc.bvn_verified,
                 documents: bvnDocs
+            },
+            selfieVerification: {
+                status: kyc.selfie_verified ? "verified" : (selfieDocs.length > 0 ? selfieDocs[0].status : "pending"),
+                verified: kyc.selfie_verified,
+                documents: selfieDocs
             },
             verificationHistory: history || []
         });
@@ -412,8 +440,12 @@ export const approveKyc = async (req, res) => {
                     updateData.address_verified = true;
                     actionMessage = "Address verification approved";
                     break;
+                case 'selfie':
+                    updateData.selfie_verified = true;
+                    actionMessage = "Selfie verification approved";
+                    break;
                 default:
-                    return res.status(400).json({ error: "Invalid verification type. Must be: bvn, bank, identity, or address" });
+                    return res.status(400).json({ error: "Invalid verification type. Must be: bvn, bank, identity, address, or selfie" });
             }
         } else {
             // Approve all verifications
@@ -422,6 +454,7 @@ export const approveKyc = async (req, res) => {
             updateData.bank_verified = true;
             updateData.identity_verified = true;
             updateData.address_verified = true;
+            updateData.selfie_verified = true;
             actionMessage = "All KYC verifications approved";
         }
 
@@ -532,8 +565,12 @@ export const rejectKyc = async (req, res) => {
                     updateData.address_verified = false;
                     actionMessage = "Address verification rejected";
                     break;
+                case 'selfie':
+                    updateData.selfie_verified = false;
+                    actionMessage = "Selfie verification rejected";
+                    break;
                 default:
-                    return res.status(400).json({ error: "Invalid verification type. Must be: bvn, bank, identity, or address" });
+                    return res.status(400).json({ error: "Invalid verification type. Must be: bvn, bank, identity, address, or selfie" });
             }
         } else {
             // Reject all verifications
@@ -541,6 +578,7 @@ export const rejectKyc = async (req, res) => {
             updateData.bank_verified = false;
             updateData.identity_verified = false;
             updateData.address_verified = false;
+            updateData.selfie_verified = false;
             updateData.completed_at = null; // Clear completion date
             actionMessage = "All KYC verifications rejected";
         }
@@ -709,7 +747,8 @@ export const approveDocument = async (req, res) => {
         'identity': 'identity_verified',
         'address': 'address_verified',
         'bank': 'bank_verified',
-        'bvn': 'bvn_verified'
+        'bvn': 'bvn_verified',
+        'selfie': 'selfie_verified'
       };
 
       const flagName = verificationFlagMap[document.document_type];
@@ -845,7 +884,8 @@ export const rejectDocument = async (req, res) => {
         'identity': 'identity_verified',
         'address': 'address_verified',
         'bank': 'bank_verified',
-        'bvn': 'bvn_verified'
+        'bvn': 'bvn_verified',
+        'selfie': 'selfie_verified'
       };
 
       const flagName = verificationFlagMap[document.document_type];

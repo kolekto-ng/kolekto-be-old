@@ -23,43 +23,30 @@ import { handleWebhook } from "./controllers/deposit.js";
 const app = express();
 app.use(helmet());
 
-const corsOptions = {
-    origin: [
-        "https://www.kolekto.com.ng",
-        "www.kolekto.com.ng",
-        "http://localhost:8080",
-        "http://localhost:8081",
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "https://staging-kolekto-fe.vercel.app",
-        "https://kolekto-admin-control-panel.vercel.app",
-        "https://test.kolekto.com.ng",
-        "test.kolekto.com.ng",
-        "https://kolekto-fe.vercel.app",
-        "kolekto-fe.vercel.app",
-        "https://kolekto.com.ng",
-        "kolekto.com.ng",
-    ],
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-};
+app.use(
+    cors({
+        origin: [
+            "https://www.kolekto.com.ng",
+            "www.kolekto.com.ng",
+            "http://localhost:8080",
+            "http://localhost:8081",
+            "http://localhost:5173",
+            "http://localhost:5174",
+            "https://staging-kolekto-fe.vercel.app",
+            "https://kolekto-admin-control-panel.vercel.app",
+            "https://test.kolekto.com.ng",
+            "test.kolekto.com.ng",
+            "https://kolekto-fe.vercel.app",
+            "https://kolekto-fe-old.vercel.app/",
+            "kolekto-fe.vercel.app",
+            "https://kolekto.com.ng",
+            "kolekto.com.ng",
+        ],
+        credentials: true, // Allow credentials (cookies) to be sent
+    })
+);
 
-app.use(cors(corsOptions));
-app.use((req, res, next) => {
-    const origin = req.headers.origin;
-    if (origin && corsOptions.origin.includes(origin)) {
-        res.header("Access-Control-Allow-Origin", origin);
-        res.header("Vary", "Origin");
-    }
-    res.header("Access-Control-Allow-Credentials", "true");
-    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-    if (req.method === "OPTIONS") {
-        return res.sendStatus(204);
-    }
-    next();
-});
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // B-1: Paystack webhook MUST receive the raw request bytes for HMAC
