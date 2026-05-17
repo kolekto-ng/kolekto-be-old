@@ -183,10 +183,6 @@ export const saveNIN = async (req, res) => {
         if (!nin || !/^\d{11}$/.test(nin)) {
             return res.status(400).json({ error: "NIN must be exactly 11 digits" });
         }
-
-        // Encrypt NIN with AES-256-CBC using the same key used for account numbers.
-        // AES-256 requires exactly 32 bytes — derive a stable 32-byte key via SHA-256
-        // so any length of ACCOUNT_ENCRYPTION_KEY works without throwing "Invalid key length".
         const ENCRYPTION_KEY = process.env.ACCOUNT_ENCRYPTION_KEY;
         const IV_LENGTH = 16;
         let ninCipher = null;
