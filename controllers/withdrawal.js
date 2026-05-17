@@ -1,4 +1,5 @@
 import axios from "axios";
+import crypto from "crypto";
 import { supabase } from "../utils/client.js";
 import { sendEmail } from "../services/emailService.js";
 import { computeWalletBalances, roundCurrency } from "../utils/financial.js";
@@ -13,6 +14,119 @@ const paystackHeaders = {
     Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
     "Content-Type": "application/json",
 };
+
+// ─── Payout-account decryption helpers ──────────────────────────────────────
+// Mirrors the logic in scripts/auditPayoutAccounts.js so we accept every
+// historical ciphertext shape: base64 string (current), `\x...` hex, raw
+// Buffer, or the `{type:"Buffer",data:[...]}` JSON form Supabase-JS
+// produced before the encryption fix.
+function getAccountEncryptionKey() {
+    const raw = process.env.ACCOUNT_ENCRYPTION_KEY;
+    if (!raw) return null;
+    let buf = Buffer.from(raw, "utf8");
+    if (buf.length !== 32 && /^[0-9a-fA-F]{64}$/.test(raw)) {
+        buf = Buffer.from(raw, "hex");
+    }
+    if (buf.length === 32) return buf;
+    return crypto.createHash("sha256").update(raw, "utf8").digest();
+}
+
+// Try to unwrap the legacy bug-shape: the original encryptAccountNumber
+// returned a Node Buffer, which Supabase-JS serialised to JSON as
+//   {"type":"Buffer","data":[1,2,...]}
+// If the underlying column was text, that literal JSON string is what got
+// persisted. If the column was bytea, PostgREST hex-encoded those JSON bytes
+// — we need to undo both layers here.
+function tryUnwrapBufferJson(value) {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("{")) return null;
+    try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && parsed.type === "Buffer" && Array.isArray(parsed.data)) {
+            return Buffer.from(parsed.data);
+        }
+    } catch {
+        /* not JSON — fall through */
+    }
+    return null;
+}
+
+function cipherToBuffer(cipherValue) {
+    if (cipherValue == null) return null;
+    if (Buffer.isBuffer(cipherValue)) return cipherValue;
+    if (cipherValue instanceof Uint8Array) return Buffer.from(cipherValue);
+    if (
+        typeof cipherValue === "object" &&
+        cipherValue.type === "Buffer" &&
+        Array.isArray(cipherValue.data)
+    ) {
+        return Buffer.from(cipherValue.data);
+    }
+    if (typeof cipherValue === "string") {
+        // Legacy text-column corruption: literal JSON-serialised Buffer.
+        const fromJson = tryUnwrapBufferJson(cipherValue);
+        if (fromJson) return fromJson;
+
+        if (cipherValue.startsWith("\\x") || cipherValue.startsWith("0x")) {
+            const hex = cipherValue.startsWith("\\x") ? cipherValue.slice(2) : cipherValue.slice(2);
+            const hexBuf = Buffer.from(hex, "hex");
+            // Legacy bytea-column corruption: hex-encoded JSON-serialised Buffer.
+            // Detect by checking whether the decoded bytes are themselves a
+            // JSON string starting with '{'.
+            if (hexBuf.length > 0 && hexBuf[0] === 0x7b /* '{' */) {
+                const unwrapped = tryUnwrapBufferJson(hexBuf.toString("utf8"));
+                if (unwrapped) return unwrapped;
+            }
+            return hexBuf;
+        }
+        return Buffer.from(cipherValue, "base64");
+    }
+    return null;
+}
+
+function tryDecryptWithBuffer(encryptedBuffer, keyBuffer) {
+    if (!encryptedBuffer || encryptedBuffer.length <= 16) return null;
+    try {
+        const iv = encryptedBuffer.subarray(0, 16);
+        const cipherText = encryptedBuffer.subarray(16);
+        const decipher = crypto.createDecipheriv("aes-256-cbc", keyBuffer, iv);
+        const decrypted = Buffer.concat([decipher.update(cipherText), decipher.final()]);
+        const plain = decrypted.toString("utf8").trim();
+        return plain || null;
+    } catch {
+        return null;
+    }
+}
+
+function decryptAccountNumber(cipherValue) {
+    const keyBuffer = getAccountEncryptionKey();
+    if (!keyBuffer) return null;
+
+    // Primary path: use whatever cipherToBuffer figures out.
+    const primary = cipherToBuffer(cipherValue);
+    const fromPrimary = tryDecryptWithBuffer(primary, keyBuffer);
+    if (fromPrimary) return fromPrimary;
+
+    // Secondary path: if the primary buffer was actually a JSON string in
+    // disguise (e.g. base64-decoded garbage), parse it manually and retry.
+    if (typeof cipherValue === "string") {
+        const trimmed = cipherValue.trim();
+        // Try treating the string as JSON directly.
+        const fromJson = tryUnwrapBufferJson(trimmed);
+        const fromJsonResult = tryDecryptWithBuffer(fromJson, keyBuffer);
+        if (fromJsonResult) return fromJsonResult;
+
+        // Try hex.
+        if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
+            const hexBuf = Buffer.from(trimmed, "hex");
+            const fromHex = tryDecryptWithBuffer(hexBuf, keyBuffer);
+            if (fromHex) return fromHex;
+        }
+    }
+
+    return null;
+}
 
 /**
  * Recompute wallet balances from source of truth and persist them.
@@ -52,17 +166,109 @@ export const requestWithdrawal = async (req, res) => {
     // ── Use the authenticated user's ID — never trust the body ───────────────
     const userId = req.user?.id;
 
-    const {
+    let {
         collection_id,
         amount,
         account_number: accountNumber,
         account_name: accountName,
         bank_name: userBankName,
         bank_code: providedBankCode,
+        payout_account_id: payoutAccountId,
+        payoutAccountId: payoutAccountIdCamel,
     } = req.body;
 
+    // Accept either snake_case or camelCase from the FE.
+    payoutAccountId = payoutAccountId || payoutAccountIdCamel || null;
+
+    // ── Hydrate missing bank details from the saved payout account ──────────
+    // The host frontend can't include `account_number` directly because the
+    // full PAN is stored encrypted (account_number_cipher) in payout_accounts
+    // — only the last-4 is plaintext. When the user picks a saved account in
+    // the WithdrawForm, the FE sends `payout_account_id` and we look up +
+    // decrypt the full number here so the admin can read it for the manual
+    // payout.
+    if (payoutAccountId && (!accountNumber || !accountName || !userBankName)) {
+        const { data: payoutAccount, error: payoutErr } = await supabase
+            .from("payout_accounts")
+            .select("id, user_id, bank_code, bank_name, account_name, account_number_cipher")
+            .eq("id", payoutAccountId)
+            .eq("user_id", userId)  // ownership check
+            .maybeSingle();
+
+        if (payoutErr) {
+            console.error("Withdrawal: payout account lookup error:", payoutErr);
+            return res.status(500).json({
+                error: "Could not load saved bank account.",
+                code: "PAYOUT_LOOKUP_FAILED",
+                details: payoutErr.message,
+            });
+        }
+        if (!payoutAccount) {
+            return res.status(404).json({
+                error: "Saved bank account not found or does not belong to you.",
+                code: "PAYOUT_NOT_FOUND",
+            });
+        }
+
+        // Fill in any missing fields from the saved account.
+        accountName = accountName || payoutAccount.account_name || null;
+        userBankName = userBankName || payoutAccount.bank_name || null;
+        providedBankCode = providedBankCode || payoutAccount.bank_code || null;
+
+        if (!accountNumber) {
+            const decrypted = decryptAccountNumber(payoutAccount.account_number_cipher);
+            if (decrypted) {
+                accountNumber = decrypted;
+            } else {
+                // Legacy unrecoverable ciphertext from the original Buffer-
+                // serialisation bug. We log the cipher shape (without the
+                // value itself) so we can tell which corruption form this
+                // user's row landed in, then return a clear actionable
+                // message: delete and re-add the bank.
+                const cipher = payoutAccount.account_number_cipher;
+                console.error("Withdrawal: unrecoverable account_number_cipher", {
+                    payout_account_id: payoutAccountId,
+                    type: typeof cipher,
+                    isBuffer: Buffer.isBuffer(cipher),
+                    isObjectWithBufferType:
+                        typeof cipher === "object" &&
+                        cipher !== null &&
+                        cipher.type === "Buffer",
+                    stringPrefix:
+                        typeof cipher === "string"
+                            ? cipher.slice(0, 6)
+                            : null,
+                    length:
+                        typeof cipher === "string"
+                            ? cipher.length
+                            : Buffer.isBuffer(cipher)
+                            ? cipher.length
+                            : null,
+                });
+                return res.status(409).json({
+                    error:
+                        "This saved bank account is from an older format and can no longer be decrypted. Please delete it in your bank settings and add it again, then retry the withdrawal.",
+                    code: "PAYOUT_LEGACY_UNRECOVERABLE",
+                    payout_account_id: payoutAccountId,
+                });
+            }
+        }
+    }
+
     if (!userId || !collection_id || !amount || !accountNumber || !accountName || !userBankName) {
-        return res.status(400).json({ error: "Missing required withdrawal fields" });
+        return res.status(400).json({
+            error: "Missing required withdrawal fields",
+            // Help the FE / debugger see which one was missing without
+            // leaking the values themselves.
+            missing: {
+                userId: !userId,
+                collection_id: !collection_id,
+                amount: !amount,
+                account_number: !accountNumber,
+                account_name: !accountName,
+                bank_name: !userBankName,
+            },
+        });
     }
 
     // ── Verify the requesting user owns this collection ──────────────────────
@@ -107,90 +313,108 @@ export const requestWithdrawal = async (req, res) => {
     }
 
     try {
-        let bankCode = providedBankCode || null;
+        // ── MANUAL WITHDRAWAL FLOW ─────────────────────────────────────────
+        // Paystack transfers are NOT used for withdrawals. The admin team
+        // processes payouts manually. We previously called Paystack's
+        // /transferrecipient endpoint here, which would fail intermittently
+        // (live-mode account verification, rate limits, missing transfer
+        // permissions on the account) and 500 the whole request — meaning
+        // hosts couldn't even SUBMIT a withdrawal.
+        //
+        // We now skip the Paystack call entirely and persist the bank
+        // details in plain readable form on the withdrawal row so the admin
+        // panel can display them for manual processing. Bank details are
+        // already encrypted at rest in payout_accounts; this row is the
+        // operational record the admin reads.
+        //
+        // bank_code is optional — used only if/when we re-enable automated
+        // transfers. We still keep the column for forward compatibility.
+        const bankCode = providedBankCode || null;
 
-        if (!bankCode) {
-            // Fallback: resolve bank code from Paystack's bank list by name
-            function getBankCodeByName(banks, bankName) {
-                const bank = banks.find(
-                    (b) => b.name.toLowerCase() === bankName.toLowerCase()
-                );
-                return bank ? bank.code : null;
+        // Try to register a Paystack recipient as a best-effort background
+        // task so re-enabling automated transfers later is one switch away.
+        // Critically: failure here MUST NOT block the withdrawal request.
+        let recipientCode = null;
+        try {
+            if (PAYSTACK_SECRET_KEY && bankCode) {
+                const { data: existingRecipient } = await supabase
+                    .from("transfer_recipients")
+                    .select("recipient_code")
+                    .eq("user_id", userId)
+                    .eq("account_number", accountNumber)
+                    .eq("bank_code", bankCode)
+                    .maybeSingle();
+                if (existingRecipient?.recipient_code) {
+                    recipientCode = existingRecipient.recipient_code;
+                }
             }
-
-            const banksRes = await axios.get("https://api.paystack.co/bank?currency=NGN", {
-                headers: paystackHeaders,
-            });
-            const banks = banksRes.data.data;
-            bankCode = getBankCodeByName(banks, userBankName);
-        }
-
-        if (!bankCode) {
-            return res.status(400).json({ error: "Invalid bank name" });
-        }
-
-        // Check for existing recipient
-        const { data: existingRecipient } = await supabase
-            .from("transfer_recipients")
-            .select("*")
-            .eq("user_id", userId)
-            .eq("account_number", accountNumber)
-            .eq("bank_code", bankCode)
-            .single();
-
-        let recipientCode;
-        if (existingRecipient) {
-            recipientCode = existingRecipient.recipient_code;
-        } else {
-            const recipientRes = await axios.post(
-                "https://api.paystack.co/transferrecipient",
-                {
-                    type: "nuban",
-                    name: accountName,
-                    account_number: accountNumber,
-                    bank_code: bankCode,
-                    bank_name: userBankName,
-                    currency: "NGN",
-                },
-                { headers: paystackHeaders }
+        } catch (recipientLookupErr) {
+            // Non-fatal — just continue without a recipient code.
+            console.warn(
+                "Withdrawal: recipient lookup failed (non-fatal):",
+                recipientLookupErr?.message || recipientLookupErr
             );
-            recipientCode = recipientRes.data.data.recipient_code;
-
-            await supabase.from("transfer_recipients").insert([{
-                user_id: userId,
-                account_number: accountNumber,
-                bank_code: bankCode,
-                account_name: accountName,
-                bank_name: userBankName,
-                recipient_code: recipientCode,
-                currency: "NGN",
-            }]);
         }
 
-        function generateTransferCode() {
-            return "TRF_" + Math.random().toString(36).substring(2, 11).toUpperCase();
-        }
-        const transferCode = generateTransferCode();
+        // Insert withdrawal record (status: pending) with readable bank
+        // details for the admin. Field shape preserved exactly so the
+        // admin panel and any other consumer continue to work:
+        //   destination_account.{ accountNumber, bankCode, accountName, bank_name, bank_code }
+        const destination_account = {
+            accountNumber,
+            accountName,
+            bank_name: userBankName,
+            // Both bank_code and bankCode for backward compat with code that
+            // reads either name. Old admin code reads `bank_name || bank_code`.
+            bankCode: bankCode || null,
+            bank_code: bankCode || null,
+        };
 
-        // Insert withdrawal record (status: pending)
+        // Local placeholder references. Both `paystack_transfer_code` and
+        // `paystack_recipient_code` historically came from Paystack and the
+        // columns are NOT NULL in the production schema. We populate both
+        // with a clearly-non-Paystack prefix so there's no confusion with
+        // real Paystack codes if/when we re-enable automated transfers.
+        const uniqueSuffix =
+            Date.now().toString(36).toUpperCase() +
+            "_" +
+            Math.random().toString(36).slice(2, 8).toUpperCase();
+        const manualTransferRef = "MAN_" + uniqueSuffix;
+        const manualRecipientRef = recipientCode || "RCP_MANUAL_" + uniqueSuffix;
+
+        const insertPayload = {
+            user_id: userId,
+            collection_id,
+            amount: withdrawalAmount,
+            status: "pending",
+            destination_account,
+            paystack_transfer_code: manualTransferRef,
+            paystack_recipient_code: manualRecipientRef,
+            wallet_id: wallet.id,
+        };
+
         const { data: insertedWithdrawal, error: insertError } = await supabase
             .from("withdrawals")
-            .insert([{
-                user_id: userId,
-                collection_id,
-                amount: withdrawalAmount,
-                status: "pending",
-                destination_account: { accountNumber, bankCode, accountName, bank_name: userBankName },
-                paystack_transfer_code: transferCode,
-                paystack_recipient_code: recipientCode,
-                wallet_id: wallet.id,
-            }])
+            .insert([insertPayload])
             .select()
             .single();
 
         if (insertError || !insertedWithdrawal) {
-            console.error("Withdrawal insert error:", insertError);
-            return res.status(500).json({ error: "Failed to create withdrawal record" });
+            // Surface the actual Supabase error so we can diagnose schema
+            // mismatches (NOT NULL violations, FK violations, etc.) instead
+            // of always returning a generic message.
+            console.error("Withdrawal insert error:", {
+                message: insertError?.message,
+                code: insertError?.code,
+                details: insertError?.details,
+                hint: insertError?.hint,
+            });
+            return res.status(500).json({
+                error: insertError?.message || "Failed to create withdrawal record",
+                code: insertError?.code || "WITHDRAWAL_INSERT_FAILED",
+                details: insertError?.details || null,
+                hint: insertError?.hint || null,
+            });
         }
 
         // Deduct from available_balance immediately and recompute full balances
@@ -253,13 +477,23 @@ export const requestWithdrawal = async (req, res) => {
                     console.error('Failed to send withdrawal email to user:', userMailErr?.message || userMailErr);
                 }
 
-                // Admin email (notify approver)
+                // Admin email (notify approver). Reads ADMIN_EMAILS / ADMIN_EMAIL
+                // from env instead of hardcoded values so non-Gazali admins
+                // receive the notification in deployments that override it.
                 try {
+                    const adminEmailRaw = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || "").trim();
+                    const adminRecipients = adminEmailRaw
+                        .split(",")
+                        .map((e) => e.trim())
+                        .filter(Boolean);
+                    const primaryAdmin = adminRecipients[0] || "gazalianfellow@gmail.com";
+                    const adminDisplayName = process.env.ADMIN_NAME || "Admin";
+
                     const approveUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/approve?id=${insertedWithdrawal.id}`;
                     const declineUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/decline?id=${insertedWithdrawal.id}`;
 
                     const adminHtml = withdrawalApprovalRequestTemplate({
-                        adminName: "Gazali",
+                        adminName: adminDisplayName,
                         userName: profile?.full_name || "User",
                         amount,
                         currency: "NGN",
@@ -273,10 +507,11 @@ export const requestWithdrawal = async (req, res) => {
                     });
 
                     await sendEmail({
-                        to: "gazalianfellow@gmail.com",
+                        to: primaryAdmin,
+                        cc: adminRecipients.slice(1).length ? adminRecipients.slice(1) : undefined,
                         subject: `Withdrawal Approval Required - ${profile?.full_name || 'Requester'}`,
                         html: adminHtml,
-                        text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}. Account Number: ${displayAccountNumber || "N/A"}`
+                        text: `A withdrawal request of ${amount} requires your approval. Withdrawal ID: ${insertedWithdrawal.id}.`,
                     });
                     console.log('✅ Withdrawal approval request sent to admin');
                 } catch (adminMailErr) {
@@ -285,32 +520,9 @@ export const requestWithdrawal = async (req, res) => {
             } catch (err) {
                 console.error("Failed to send withdrawal email to user:", err?.message || err);
             }
-
-            try {
-                const approveUrl = `${process.env.FRONTEND_URL || "https://www.kolekto.com.ng"}/admin/withdrawals/approve?id=${insertedWithdrawal.id}`;
-                const declineUrl = `${process.env.FRONTEND_URL || "https://www.kolekto.com.ng"}/admin/withdrawals/decline?id=${insertedWithdrawal.id}`;
-                const adminHtml = withdrawalApprovalRequestTemplate({
-                    adminName: "Gazali",
-                    userName: profile?.full_name || "User",
-                    amount: withdrawalAmount,
-                    currency: "NGN",
-                    withdrawalId: insertedWithdrawal.id,
-                    accountName,
-                    accountNumber,
-                    bankName: userBankName,
-                    submittedAt: insertedWithdrawal.created_at || new Date().toISOString(),
-                    approveUrl,
-                    declineUrl,
-                });
-                await sendEmail({
-                    to: "gazalianfellow@gmail.com",
-                    subject: `Withdrawal Approval Required - ${profile?.full_name || "Requester"}`,
-                    html: adminHtml,
-                    text: `Withdrawal request of ₦${withdrawalAmount} requires approval. ID: ${insertedWithdrawal.id}`,
-                });
-            } catch (err) {
-                console.error("Failed to send withdrawal approval email to admin:", err?.message || err);
-            }
+            // NOTE: a second, duplicate admin-email block used to live here.
+            // It was sending the same approval email twice with identical
+            // subject lines. Removed — keep only the single send above.
         })();
 
         return res.status(200).json({
@@ -484,10 +696,13 @@ export const approveWithdrawal = async (req, res) => {
         return res.status(404).json({ error: "Wallet not found" });
     }
 
-    // Mark withdrawal as successful
+    // Mark withdrawal as approved. The admin panel writes "approved" via
+    // direct Supabase update for the manual-payout flow; using the same
+    // status here keeps the two paths consistent. Legacy rows with
+    // status="success" still count as completed in computeWalletBalances.
     await supabase
         .from("withdrawals")
-        .update({ status: "success" })
+        .update({ status: "approved", updated_at: new Date().toISOString() })
         .eq("id", withdrawal.id);
 
     // Recompute all balances from source of truth

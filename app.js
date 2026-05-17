@@ -13,11 +13,14 @@ import kycRouter from "./routes/settings/kyc.js";
 import securityRouter from "./routes/settings/security.js";
 import landingPageRouter from "./routes/landingPage.js";
 import adminRouter from "./routes/admin/kyc.js";
+import adminPaymentsRouter from "./routes/admin/payments.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
 import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
+// Imported directly so we can mount the webhook route with a RAW body parser
+// before the global JSON parser. See B-1 below.
+import { handleWebhook } from "./controllers/deposit.js";
 const app = express();
-
 app.use(helmet());
 
 app.use(
@@ -45,8 +48,39 @@ app.use(
 
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// B-1: Paystack webhook MUST receive the raw request bytes for HMAC
+// verification. Paystack signs the exact bytes of the body. If we let
+// express.json() parse first, our HMAC verification ends up computing the
+// hash over JSON.stringify(parsed) which has different whitespace / key
+// order than the original — so signatures NEVER match.
+//
+// We mount this single endpoint with express.raw BEFORE the global JSON
+// parser so handleWebhook gets req.body as a Buffer. handleWebhook is
+// already written to handle both Buffer and parsed bodies, so it works in
+// either order — but the raw path is the only one where signatures match.
+//
+// Note: this is registered ahead of the paymentRouter mount; the route inside
+// routes/payment.js has been removed (was the same path).
+// ─────────────────────────────────────────────────────────────────────────────
+app.post(
+    "/api/payments/webhook",
+    // type is a function so it always matches regardless of charset qualifiers
+    // (e.g. "application/json; charset=utf-8") that Paystack may include.
+    // This route is webhook-only so accepting any Content-Type is safe.
+    express.raw({ type: () => true, limit: "2mb" }),
+    handleWebhook
+);
+
 app.use(express.json());
 app.use(cookieParser());
+
+app.get("/", (req, res) => {
+    res.status(200).json({
+        success: true,
+        message: "Kolekto backend is running successfully"
+    });
+});
 
 app.use("/api", contributorRouter);
 app.use("/api/auth", authRouter);
@@ -59,6 +93,9 @@ app.use("/api/settings/kyc", kycRouter);
 app.use("/api/settings/security", securityRouter);
 app.use("/api/landing-page", landingPageRouter);
 app.use("/api/adminurlabdkole", adminRouter);
+// Same admin prefix — Express composes multiple routers on the same mount.
+// F5: admin reconcile-payment endpoint.
+app.use("/api/adminurlabdkole", adminPaymentsRouter);
 
 const port = process.env.PORT || 5050;
 

@@ -105,7 +105,14 @@ export const uploadAvatar = async (req, res, next) => {
 export const fetchBanks = async (req, res) => {
     try {
         const banks = await getBanks();
-        res.json(banks);
+        const seenCodes = new Set();
+        const uniqueBanks = (banks || []).filter((bank) => {
+            const code = String(bank?.code || "").trim();
+            if (!code || seenCodes.has(code)) return false;
+            seenCodes.add(code);
+            return true;
+        });
+        res.json(uniqueBanks);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -130,16 +137,44 @@ export const verifyBankAccount = async (req, res) => {
 import crypto from "crypto";
 import stringSimilarity from "string-similarity";
 
-const ENCRYPTION_KEY = process.env.ACCOUNT_ENCRYPTION_KEY; // 32 chars for AES-256
 const IV_LENGTH = 16; // AES block size
 
-// AES-256-CBC encryption
+// Derive a stable 32-byte key from ACCOUNT_ENCRYPTION_KEY.
+// Accepts:
+//   - a 32-byte raw string  → use bytes directly
+//   - a 64-char hex string  → decode to 32 bytes
+//   - any other passphrase  → SHA-256 → 32 bytes
+// Mirrors the helper used in controllers/settings/kyc.js so both modules
+// encrypt with the same key derivation. Module-load errors are avoided by
+// reading the env var lazily on each call (env may not be loaded at import time
+// for some test/CI paths).
+function getEncryptionKeyBuffer() {
+    const raw = process.env.ACCOUNT_ENCRYPTION_KEY;
+    if (!raw) return null;
+    let buf = Buffer.from(raw, "utf8");
+    if (buf.length !== 32 && /^[0-9a-fA-F]{64}$/.test(raw)) {
+        buf = Buffer.from(raw, "hex");
+    }
+    if (buf.length === 32) return buf;
+    return crypto.createHash("sha256").update(raw, "utf8").digest();
+}
+
+// AES-256-CBC encryption.
+// Returns base64 string `iv||ciphertext` so the value can be stored in any
+// column type (bytea, text, jsonb) and round-trips cleanly through PostgREST.
+// The audit script (scripts/auditPayoutAccounts.js) already decodes base64.
 function encryptAccountNumber(text) {
+    const keyBuffer = getEncryptionKeyBuffer();
+    if (!keyBuffer) {
+        throw new Error("ACCOUNT_ENCRYPTION_KEY is not configured");
+    }
     const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(ENCRYPTION_KEY), iv);
-    let encrypted = cipher.update(text);
-    encrypted = Buffer.concat([encrypted, cipher.final()]);
-    return Buffer.concat([iv, encrypted]); // store IV + ciphertext
+    const cipher = crypto.createCipheriv("aes-256-cbc", keyBuffer, iv);
+    const encrypted = Buffer.concat([
+        cipher.update(String(text), "utf8"),
+        cipher.final(),
+    ]);
+    return Buffer.concat([iv, encrypted]).toString("base64");
 }
 
 export const saveAccount = async (req, res) => {
@@ -166,10 +201,41 @@ export const saveAccount = async (req, res) => {
             .single();
         if (profileErr) throw profileErr;
         if (!profile) return res.status(404).json({ error: "User profile not found" });
+        if (!profile.full_name || !profile.full_name.trim()) {
+            return res.status(400).json({
+                error: "Add your full name to your profile before linking a bank account",
+            });
+        }
         // i need to end this function if the user is yet to verify their identity
 
-        // 2️⃣ Verify account with provider
-        const { account_name } = await verifyAccount(account_number, bank_code, provider);
+        // 2️⃣ Verify account with provider. Paystack network/5xx errors are
+        // surfaced as 502 so the frontend can prompt the user to retry rather
+        // than seeing a generic "Internal server error".
+        let account_name;
+        try {
+            const result = await verifyAccount(account_number, bank_code, provider);
+            account_name = result?.account_name;
+        } catch (verifyErr) {
+            const status = verifyErr?.response?.status;
+            const message =
+                verifyErr?.response?.data?.message ||
+                verifyErr?.message ||
+                "Bank verification failed. Please try again.";
+            // Paystack itself or upstream connectivity issue → 502 (gateway).
+            // Anything 4xx from Paystack is mapped through as a 400 to the user.
+            const httpStatus = status && status >= 400 && status < 500 ? 400 : 502;
+            return res.status(httpStatus).json({
+                error: message,
+                code: "BANK_VERIFICATION_FAILED",
+            });
+        }
+
+        if (!account_name) {
+            return res.status(400).json({
+                error: "Could not resolve account name from bank. Please double-check the details and try again.",
+                code: "BANK_VERIFICATION_FAILED",
+            });
+        }
 
         // 3️⃣ Fuzzy match profile name with bank account name
         const similarity = stringSimilarity.compareTwoStrings(
@@ -184,11 +250,45 @@ export const saveAccount = async (req, res) => {
             });
         }
 
-        // 4️⃣ Create recipient code via provider
-        const { recipient_code } = await createRecipient(account_number, bank_code, account_name, provider);
+        // 4️⃣ Create recipient code via provider. Wrap so a Paystack outage
+        // here is reported as 502 instead of a generic 500.
+        let recipient_code;
+        try {
+            const recipient = await createRecipient(account_number, bank_code, account_name, provider);
+            recipient_code = recipient?.recipient_code;
+        } catch (recipientErr) {
+            const status = recipientErr?.response?.status;
+            const message =
+                recipientErr?.response?.data?.message ||
+                recipientErr?.message ||
+                "Could not register payout recipient. Please try again.";
+            const httpStatus = status && status >= 400 && status < 500 ? 400 : 502;
+            return res.status(httpStatus).json({
+                error: message,
+                code: "RECIPIENT_CREATION_FAILED",
+            });
+        }
 
-        // 5️⃣ Encrypt account number & get last 4 digits
-        const encryptedAccount = encryptAccountNumber(account_number);
+        if (!recipient_code) {
+            return res.status(502).json({
+                error: "Payout recipient was not created. Please try again.",
+                code: "RECIPIENT_CREATION_FAILED",
+            });
+        }
+
+        // 5️⃣ Encrypt account number & get last 4 digits.
+        // encryptAccountNumber now returns a base64 string so the value
+        // serialises cleanly into the payout_accounts column via PostgREST.
+        let encryptedAccount;
+        try {
+            encryptedAccount = encryptAccountNumber(account_number);
+        } catch (encryptErr) {
+            console.error("Save Account: encrypt error:", encryptErr?.message || encryptErr);
+            return res.status(500).json({
+                error: "Server misconfiguration: account encryption unavailable.",
+                code: "ENCRYPTION_UNAVAILABLE",
+            });
+        }
         const last4 = account_number.slice(-4);
 
         // 6️⃣ Check if user already has payout accounts
@@ -283,8 +383,19 @@ export const saveAccount = async (req, res) => {
             repaired: false
         });
     } catch (err) {
-        console.error("Save Account Error:", err);
-        res.status(500).json({ error: err.message });
+        // Log structured detail server-side (without leaking the cipher) and
+        // return a stable error code the frontend can show meaningfully.
+        console.error("Save Account Error:", {
+            message: err?.message,
+            code: err?.code,
+            details: err?.details,
+            hint: err?.hint,
+        });
+        return res.status(500).json({
+            error: err?.message || "Failed to save bank account.",
+            code: err?.code || "SAVE_ACCOUNT_FAILED",
+            details: err?.details || null,
+        });
     }
 };
 
@@ -307,32 +418,68 @@ export const getAccounts = async (req, res) => {
     }
 };
 
-// Set default account
+// Set default account.
+//
+// SECURITY (B-5): Previously this route read `user_id` from the request
+// body and used it to clear/set defaults — meaning an attacker could pass
+// another user's `user_id` and flip the victim's default payout account.
+// We now ALWAYS use `req.user.id` (set by verifyToken) and ignore any
+// `user_id` the client sends.
 export const setDefaultAccount = async (req, res) => {
-    const { user_id, account_id } = req.body;
+    const user_id = req.user?.id;
+    const { account_id } = req.body || {};
+
+    if (!user_id) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!account_id) {
+        return res.status(400).json({ error: "account_id is required" });
+    }
 
     try {
-        // clear all defaults
+        // Verify ownership of the target account BEFORE any mutation.
+        // Avoids accidentally clearing a user's defaults via an invalid id.
+        const { data: target, error: lookupErr } = await supabase
+            .from("payout_accounts")
+            .select("id, user_id")
+            .eq("id", account_id)
+            .eq("user_id", user_id)
+            .maybeSingle();
+
+        if (lookupErr) throw lookupErr;
+        if (!target) {
+            return res.status(404).json({
+                error: "Account not found or does not belong to you.",
+                code: "PAYOUT_NOT_FOUND",
+            });
+        }
+
+        // Clear all of THIS user's defaults (never anyone else's).
         const { error: clearErr } = await supabase
             .from("payout_accounts")
             .update({ is_default: false })
             .eq("user_id", user_id);
-
         if (clearErr) throw clearErr;
 
-        // set chosen default
+        // Set the chosen default.
         const { data, error } = await supabase
             .from("payout_accounts")
             .update({ is_default: true })
             .eq("id", account_id)
-            .eq("user_id", user_id)
+            .eq("user_id", user_id) // double-guard
             .select()
             .single();
-
         if (error) throw error;
 
-        res.json(data);
+        return res.json(data);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error("setDefaultAccount error:", {
+            message: err?.message,
+            code: err?.code,
+        });
+        return res.status(500).json({
+            error: err?.message || "Failed to set default account",
+            code: err?.code || "SET_DEFAULT_FAILED",
+        });
     }
 };
