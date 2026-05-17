@@ -37,7 +37,7 @@ app.use(
             "https://test.kolekto.com.ng",
             "test.kolekto.com.ng",
             "https://kolekto-fe.vercel.app",
-            "https://kolekto-fe-old.vercel.app/",
+            "https://kolekto-fe-old.vercel.app",
             "kolekto-fe.vercel.app",
             "https://kolekto.com.ng",
             "kolekto.com.ng",
