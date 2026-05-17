@@ -4,7 +4,6 @@ import {
     verifyPayment,
     listTransactions,
     fetchTransaction,
-    handleWebhook,
     sendReceiptNotification,
 } from "../controllers/deposit.js";
 
@@ -22,8 +21,11 @@ router.get("/transactions", listTransactions);
 // Fetch a single transaction by ID
 router.get("/transaction/:id", fetchTransaction);
 
-// Paystack verify payment webhook endpoint
-// Signature verification in `handleWebhook` is sufficient and more robust than fixed IP allowlists.
-router.post("/webhook", handleWebhook);
+// NOTE: POST /webhook is intentionally NOT registered here.
+//
+// The webhook needs the RAW request body (Buffer) for Paystack HMAC
+// signature verification. The global express.json() parser would consume
+// the body before this router runs, so we mount the webhook route directly
+// in app.js BEFORE express.json() with express.raw(). See B-1 in app.js.
 
 export default router;

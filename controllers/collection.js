@@ -1,4 +1,5 @@
 import { supabase } from '../utils/client.js';
+import { calculateFees } from '../utils/financial.js';
 
 // Helper function to generate slug from title
 const generateSlug = (title) => {
@@ -148,72 +149,50 @@ export const createCollection = async (req, res) => {
     // 3. Fee Breakdown
     // ------------------------
 
+    // B-13: Fee math goes through the canonical calculateFees() helper.
+    // We preserve the OUTPUT shape exactly (including the legacy field name
+    // `paymentGatewayFee`) so the host frontend, admin panel, and any other
+    // consumer continue to see the same payload they did before.
+    const resolvedFeeBearer = fee_bearer || "organizer";
+
     if (collectionType === "fixed" && !isNaN(parsedAmount)) {
-        // ----------- fixed collection fees -----------
-        let kolektoFee = Math.min(parsedAmount * 0.005, 2000); // 0.5% capped at ₦2,000
-        let gatewayFee = Math.min(parsedAmount * 0.015, 2000); // 1.5% capped at ₦2,000
-
-        const totalFees = kolektoFee + gatewayFee;
-
-
+        const { platformFee, gatewayFee, totalFees, totalPayable } =
+            calculateFees(parsedAmount, "fixed", resolvedFeeBearer);
         amountBreakdown = {
             type: "fixed",
             amount: parsedAmount,
-            fee_bearer: fee_bearer || "organizer",
-            platformFee: kolektoFee,
+            fee_bearer: resolvedFeeBearer,
+            platformFee,
             paymentGatewayFee: gatewayFee,
             totalFees,
-            totalPayable:
-                fee_bearer === "contributor"
-                    ? parsedAmount + totalFees
-                    : parsedAmount,
+            totalPayable,
         };
     } else if (collectionType === "tiered") {
-        // ----------- Tiered collection fees -----------
         amountBreakdown = {
             type: "tiered",
             tiers: price_tiers.map((tier) => {
-                // Kolekto fee: 0.5% capped at ₦2,000
-                let kolektoFee = Math.min(tier.price * 0.005, 2000);
-
-                // Gateway fee: 1.5% capped at ₦2,000
-                let gatewayFee = Math.min(tier.price * 0.015, 2000);
-
-                const totalFees = kolektoFee + gatewayFee;
-
+                const tierPriceNum = Number(tier.price);
+                const { platformFee, gatewayFee, totalFees, totalPayable } =
+                    calculateFees(tierPriceNum, "tiered", resolvedFeeBearer);
                 return {
                     name: tier.name,
                     price: tier.price,
                     quantity: tier.quantity, // null = unlimited
-                    fee_bearer: fee_bearer || "organizer",
-                    platformFee: kolektoFee,
+                    fee_bearer: resolvedFeeBearer,
+                    platformFee,
                     paymentGatewayFee: gatewayFee,
                     totalFees,
-                    totalPayable:
-                        fee_bearer === "contributor"
-                            ? tier.price + totalFees
-                            : tier.price,
+                    totalPayable,
                 };
             }),
         };
     }
 
-    if (collection_type === "fundraising") {
-        if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 100) {
-            return res.status(400).json({ message: "Amount must be greater than ₦100 for fundraising collections" });
-        }
-        collectionType = "fundraising"; // fundraising uses fixed amount per contribution
-        fee_bearer = "contributor"; // force fee bearer to contributor for fundraising
-        amountBreakdown = {
-            type: "fundraising",
-            amount: parsedAmount,
-            fee_bearer: "contributor",
-            platformFee: 0.01,
-            paymentGatewayFee: 0.015,
-            totalFees: 0.025,
-        };
-
-    }
+    // The fundraising branch above (around line 76) already validates `amount`
+    // and seeds `amountBreakdown`. A duplicate block lived here that re-ran
+    // the same logic but with `parsedAmount` (which is `null` until further
+    // down for the fundraising path) — producing a half-populated breakdown
+    // that overrode the correct one. Removed.
 
     try {
         // ------------------------
