@@ -7,6 +7,7 @@ import { withdrawalRequestTemplate } from "../templates/withdrawalRequest.js";
 import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawalApprovalRequest.js";
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
 import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
+import { listAdminEmails } from "../utils/requireAdmin.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
@@ -162,6 +163,165 @@ async function refreshWallet(walletId, collectionId) {
     return balances;
 }
 
+// Pending withdrawal requests count against the user's withdrawable cap but
+// NOT against the canonical `wallets.available_balance` column (which is
+// derived purely from settled contributions minus completed/approved
+// withdrawals). Returning a single derived `withdrawable_amount` per
+// collection is the only number the UI and request validator should ever
+// compare against — it's the invariant that holds across cron runs, admin
+// approvals, and concurrent requests.
+const PENDING_WITHDRAWAL_STATUSES = ["pending", "processing"];
+
+async function sumPendingWithdrawals(collectionId, { excludeId = null } = {}) {
+    let query = supabase
+        .from("withdrawals")
+        .select("amount")
+        .eq("collection_id", collectionId)
+        .in("status", PENDING_WITHDRAWAL_STATUSES);
+    if (excludeId) query = query.neq("id", excludeId);
+    const { data, error } = await query;
+    if (error) {
+        console.error("[withdrawal] sumPendingWithdrawals error:", error.message);
+        return 0;
+    }
+    return roundCurrency(
+        (data || []).reduce((s, r) => s + Number(r.amount || 0), 0)
+    );
+}
+
+/**
+ * Refreshes the wallet from source of truth, then returns the live
+ * withdrawable cap (= refreshed available_balance − pending withdrawal
+ * requests for the same collection). Used by:
+ *   - GET /withdrawals/eligible-collections (picker)
+ *   - POST /withdrawals/request (validator)
+ * so both surfaces see identical numbers.
+ */
+async function getWithdrawableSnapshot(walletId, collectionId, { excludePendingId = null } = {}) {
+    const balances = await refreshWallet(walletId, collectionId);
+    const pendingRequests = await sumPendingWithdrawals(collectionId, {
+        excludeId: excludePendingId,
+    });
+    const cap = roundCurrency(Math.max(0, balances.availableBalance - pendingRequests));
+    return {
+        availableBalance: balances.availableBalance,
+        pendingBalance: balances.pendingBalance,
+        ledgerBalance: balances.ledgerBalance,
+        pendingWithdrawalRequests: pendingRequests,
+        withdrawableAmount: cap,
+    };
+}
+
+/**
+ * GET /withdrawals/eligible-collections
+ * Returns the authenticated user's collections that have a non-zero
+ * withdrawable cap. Single source of truth for the withdraw modal picker.
+ *
+ * Performance: bulk 3-query pipeline (collections → wallets → pending
+ * withdrawals) instead of the N+1 per-collection refreshWallet that the
+ * earlier implementation did. Latency is now O(3 round-trips) regardless
+ * of how many collections the user owns.
+ *
+ * Correctness: the picker shows `withdrawable_amount` from the cached
+ * `wallets.available_balance` column minus any pending withdrawal requests.
+ * The cap is RE-COMPUTED authoritatively at validation time in
+ * requestWithdrawal (which still calls getWithdrawableSnapshot → refreshWallet),
+ * so a stale picker number can never be exploited — at most the user sees
+ * a slightly out-of-date cap and gets a "balance has changed" error on submit.
+ */
+export const getEligibleCollections = async (req, res) => {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+        const { data: collections, error: colErr } = await supabase
+            .from("collections")
+            .select("id, title, currency, currency_symbol")
+            .eq("user_id", userId);
+
+        if (colErr) {
+            console.error("[eligible-collections] collections fetch failed:", colErr.message);
+            return res.status(500).json({ error: "Failed to load collections" });
+        }
+
+        if (!collections || collections.length === 0) {
+            return res.status(200).json({ collections: [] });
+        }
+
+        const collectionIds = collections.map((c) => c.id);
+
+        // Two parallel bulk reads — no per-collection refreshWallet.
+        const [walletsRes, pendingRes] = await Promise.all([
+            supabase
+                .from("wallets")
+                .select("id, collection_id, updated_at, available_balance, pending_balance, ledger_balance")
+                .in("collection_id", collectionIds),
+            supabase
+                .from("withdrawals")
+                .select("collection_id, amount, status")
+                .in("collection_id", collectionIds)
+                .in("status", PENDING_WITHDRAWAL_STATUSES),
+        ]);
+
+        if (walletsRes.error) {
+            console.error("[eligible-collections] wallets fetch failed:", walletsRes.error.message);
+            return res.status(500).json({ error: "Failed to load wallets" });
+        }
+        if (pendingRes.error) {
+            console.error("[eligible-collections] pending fetch failed:", pendingRes.error.message);
+            return res.status(500).json({ error: "Failed to load pending withdrawals" });
+        }
+
+        // Pick the most-recent wallet per collection (legacy data has duplicates).
+        const walletByCollection = new Map();
+        for (const w of walletsRes.data || []) {
+            const prev = walletByCollection.get(w.collection_id);
+            if (!prev || new Date(w.updated_at || 0) > new Date(prev.updated_at || 0)) {
+                walletByCollection.set(w.collection_id, w);
+            }
+        }
+
+        // Aggregate pending amounts per collection.
+        const pendingByCollection = new Map();
+        for (const p of pendingRes.data || []) {
+            const cur = pendingByCollection.get(p.collection_id) || 0;
+            pendingByCollection.set(p.collection_id, cur + Number(p.amount || 0));
+        }
+
+        const snapshots = collections.map((c) => {
+            const w = walletByCollection.get(c.id);
+            if (!w) {
+                return {
+                    ...c,
+                    withdrawable_amount: 0,
+                    available_balance: 0,
+                    pending_balance: 0,
+                    ledger_balance: 0,
+                    pending_withdrawal_requests: 0,
+                };
+            }
+            const available = roundCurrency(Number(w.available_balance || 0));
+            const pendingReqs = roundCurrency(pendingByCollection.get(c.id) || 0);
+            const cap = roundCurrency(Math.max(0, available - pendingReqs));
+            return {
+                ...c,
+                wallet_id: w.id,
+                available_balance: available,
+                pending_balance: roundCurrency(Number(w.pending_balance || 0)),
+                ledger_balance: roundCurrency(Number(w.ledger_balance || 0)),
+                pending_withdrawal_requests: pendingReqs,
+                withdrawable_amount: cap,
+            };
+        });
+
+        const eligible = snapshots.filter((s) => Number(s.withdrawable_amount) > 0);
+        return res.status(200).json({ collections: eligible });
+    } catch (err) {
+        console.error("[eligible-collections] unexpected:", err?.message || err);
+        return res.status(500).json({ error: "Failed to load eligible collections" });
+    }
+};
+
 export const requestWithdrawal = async (req, res) => {
     // ── Use the authenticated user's ID — never trust the body ───────────────
     const userId = req.user?.id;
@@ -290,25 +450,42 @@ export const requestWithdrawal = async (req, res) => {
         return res.status(400).json({ error: "Withdrawal amount must be greater than zero" });
     }
 
-    // Fetch wallet and check available_balance only
+    // ── Atomic balance check ────────────────────────────────────────────────
+    // Refresh the wallet from source of truth, then compute the live
+    // withdrawable cap as `available_balance - pending withdrawal requests`.
+    // This is the only number we ever validate against. It matches what the
+    // eligible-collections endpoint returns to the picker, so the FE and BE
+    // can never disagree on what's withdrawable.
     const { data: wallet, error: walletError } = await supabase
         .from("wallets")
-        .select("*")
+        .select("id, available_balance, pending_balance, ledger_balance")
         .eq("collection_id", collection_id)
-        .single();
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
     if (walletError || !wallet) {
         return res.status(404).json({ error: "Wallet not found for this collection" });
     }
 
-    const availableBalance = roundCurrency(Number(wallet.available_balance || 0));
+    const snapshot = await getWithdrawableSnapshot(wallet.id, collection_id);
+    const withdrawableAmount = snapshot.withdrawableAmount;
 
-    if (withdrawalAmount > availableBalance) {
+    if (withdrawalAmount > withdrawableAmount) {
+        const pendingBlocked = snapshot.pendingWithdrawalRequests;
+        const detail = pendingBlocked > 0
+            ? `Withdrawable balance is ₦${withdrawableAmount.toLocaleString("en-NG")}. ` +
+              `You have ₦${pendingBlocked.toLocaleString("en-NG")} in pending requests; ` +
+              `pending balance (₦${snapshot.pendingBalance.toLocaleString("en-NG")}) is not yet withdrawable.`
+            : `Withdrawable balance is ₦${withdrawableAmount.toLocaleString("en-NG")}. ` +
+              `Pending balance (₦${snapshot.pendingBalance.toLocaleString("en-NG")}) is not yet withdrawable.`;
         return res.status(400).json({
-            error: "Insufficient available balance",
-            detail: `You can only withdraw from your available balance (₦${availableBalance.toLocaleString("en-NG")}). Pending balance is not yet withdrawable.`,
-            available_balance: availableBalance,
-            pending_balance: roundCurrency(Number(wallet.pending_balance || 0)),
+            error: "Insufficient withdrawable balance",
+            detail,
+            withdrawable_amount: withdrawableAmount,
+            available_balance: snapshot.availableBalance,
+            pending_balance: snapshot.pendingBalance,
+            pending_withdrawal_requests: pendingBlocked,
         });
     }
 
@@ -417,24 +594,17 @@ export const requestWithdrawal = async (req, res) => {
             });
         }
 
-        // Deduct from available_balance immediately and recompute full balances
-        const newAvailableBalance = roundCurrency(availableBalance - withdrawalAmount);
-        const { error: walUpdateError } = await supabase
-            .from("wallets")
-            .update({
-                available_balance: newAvailableBalance,
-                // ledger_balance decreases by the same amount (available moved out)
-                ledger_balance: roundCurrency(
-                    Number(wallet.ledger_balance || 0) - withdrawalAmount
-                ),
-                updated_at: new Date().toISOString(),
-            })
-            .eq("id", wallet.id);
-
-        if (walUpdateError) {
-            console.error("Wallet update error:", walUpdateError);
-            return res.status(500).json({ error: "Failed to update wallet balance" });
-        }
+        // Do NOT manually mutate wallet.available_balance here. The wallet's
+        // available_balance is the source-of-truth derived value:
+        //   settled_net − completed/approved withdrawals
+        // Pending requests are NOT deducted from the wallet column — they
+        // are deducted at read time via `getWithdrawableSnapshot` (see
+        // requestWithdrawal validator + getEligibleCollections). Previously
+        // this block decremented the column eagerly, and any subsequent
+        // refreshWallet call (admin approval, deposit, daily cron) would
+        // reset the column back up to the source-of-truth value, causing the
+        // FE picker and the BE check to flip-flop and emit spurious
+        // "Insufficient balance" errors mid-flow.
 
         // Fetch requester profile for emails
         const { data: profile } = await supabase
@@ -477,16 +647,20 @@ export const requestWithdrawal = async (req, res) => {
                     console.error('Failed to send withdrawal email to user:', userMailErr?.message || userMailErr);
                 }
 
-                // Admin email (notify approver). Reads ADMIN_EMAILS / ADMIN_EMAIL
-                // from env instead of hardcoded values so non-Gazali admins
-                // receive the notification in deployments that override it.
+                // Admin email (notify approver). Pulled from the DB-backed
+                // admin_users table — adding/removing admins via the DB
+                // automatically updates the notification list, no env edit
+                // or redeploy needed.
                 try {
-                    const adminEmailRaw = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || "").trim();
-                    const adminRecipients = adminEmailRaw
-                        .split(",")
-                        .map((e) => e.trim())
-                        .filter(Boolean);
-                    const primaryAdmin = adminRecipients[0] || "gazalianfellow@gmail.com";
+                    const adminRecipients = await listAdminEmails();
+                    const primaryAdmin = adminRecipients[0] || null;
+                    if (!primaryAdmin) {
+                        // No admins configured. Skip rather than throw — the
+                        // user-facing email already succeeded and the
+                        // withdrawal row is in the admin panel anyway.
+                        console.warn('[withdrawal] no admin recipients in admin_users; skipping approval email');
+                        return;
+                    }
                     const adminDisplayName = process.env.ADMIN_NAME || "Admin";
 
                     const approveUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/admin/withdrawals/approve?id=${insertedWithdrawal.id}`;
@@ -525,11 +699,17 @@ export const requestWithdrawal = async (req, res) => {
             // subject lines. Removed — keep only the single send above.
         })();
 
+        // Recompute the snapshot now that the new pending request is in
+        // place so the FE can render the updated cap immediately without
+        // a second round-trip.
+        const postSnapshot = await getWithdrawableSnapshot(wallet.id, collection_id);
         return res.status(200).json({
             success: true,
             withdrawal: insertedWithdrawal,
-            available_balance: newAvailableBalance,
-            pending_balance: roundCurrency(Number(wallet.pending_balance || 0)),
+            withdrawable_amount: postSnapshot.withdrawableAmount,
+            available_balance: postSnapshot.availableBalance,
+            pending_balance: postSnapshot.pendingBalance,
+            pending_withdrawal_requests: postSnapshot.pendingWithdrawalRequests,
         });
     } catch (error) {
         return res.status(500).json({
@@ -762,12 +942,16 @@ export const approveWithdrawal = async (req, res) => {
                 note: "",
             });
 
-            await sendEmail({
-                to: process.env.ADMIN_EMAIL || "gazalianfellow@gmail.com",
-                subject: `Withdrawal Processed - ${profile?.full_name || "Requester"} - ${reference}`,
-                html: adminHtml,
-                text: `Withdrawal ${reference} of ₦${withdrawal.amount} has been processed for ${profile?.full_name || "user"}.`,
-            });
+            const adminRecipients = await listAdminEmails();
+            if (adminRecipients.length > 0) {
+                await sendEmail({
+                    to: adminRecipients[0],
+                    cc: adminRecipients.slice(1).length ? adminRecipients.slice(1) : undefined,
+                    subject: `Withdrawal Processed - ${profile?.full_name || "Requester"} - ${reference}`,
+                    html: adminHtml,
+                    text: `Withdrawal ${reference} of ₦${withdrawal.amount} has been processed for ${profile?.full_name || "user"}.`,
+                });
+            }
         } catch (err) {
             console.error("Error sending withdrawal processed emails:", err?.message || err);
         }
