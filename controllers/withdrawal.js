@@ -250,26 +250,34 @@ export const getEligibleCollections = async (req, res) => {
 
         const collectionIds = collections.map((c) => c.id);
 
-        // Two parallel bulk reads — no per-collection refreshWallet.
-        const [walletsRes, pendingRes] = await Promise.all([
+        // Three parallel bulk reads — no per-collection refreshWallet.
+        const [walletsRes, contributionsRes, withdrawalsRes] = await Promise.all([
             supabase
                 .from("wallets")
-                .select("id, collection_id, updated_at, available_balance, pending_balance, ledger_balance")
+                .select("id, collection_id, updated_at")
+                .in("collection_id", collectionIds),
+            supabase
+                .from("contributions")
+                .select("collection_id, amount, gross_amount, created_at")
+                .eq("status", "paid")
                 .in("collection_id", collectionIds),
             supabase
                 .from("withdrawals")
                 .select("collection_id, amount, status")
-                .in("collection_id", collectionIds)
-                .in("status", PENDING_WITHDRAWAL_STATUSES),
+                .in("collection_id", collectionIds),
         ]);
 
         if (walletsRes.error) {
             console.error("[eligible-collections] wallets fetch failed:", walletsRes.error.message);
             return res.status(500).json({ error: "Failed to load wallets" });
         }
-        if (pendingRes.error) {
-            console.error("[eligible-collections] pending fetch failed:", pendingRes.error.message);
-            return res.status(500).json({ error: "Failed to load pending withdrawals" });
+        if (contributionsRes.error) {
+            console.error("[eligible-collections] contributions fetch failed:", contributionsRes.error.message);
+            return res.status(500).json({ error: "Failed to load contributions" });
+        }
+        if (withdrawalsRes.error) {
+            console.error("[eligible-collections] withdrawals fetch failed:", withdrawalsRes.error.message);
+            return res.status(500).json({ error: "Failed to load withdrawals" });
         }
 
         // Pick the most-recent wallet per collection (legacy data has duplicates).
@@ -281,11 +289,20 @@ export const getEligibleCollections = async (req, res) => {
             }
         }
 
-        // Aggregate pending amounts per collection.
-        const pendingByCollection = new Map();
-        for (const p of pendingRes.data || []) {
-            const cur = pendingByCollection.get(p.collection_id) || 0;
-            pendingByCollection.set(p.collection_id, cur + Number(p.amount || 0));
+        // Group contributions by collection
+        const contributionsByCollection = new Map();
+        for (const c of contributionsRes.data || []) {
+            const list = contributionsByCollection.get(c.collection_id) || [];
+            list.push(c);
+            contributionsByCollection.set(c.collection_id, list);
+        }
+
+        // Group withdrawals by collection
+        const withdrawalsByCollection = new Map();
+        for (const w of withdrawalsRes.data || []) {
+            const list = withdrawalsByCollection.get(w.collection_id) || [];
+            list.push(w);
+            withdrawalsByCollection.set(w.collection_id, list);
         }
 
         const snapshots = collections.map((c) => {
@@ -300,15 +317,28 @@ export const getEligibleCollections = async (req, res) => {
                     pending_withdrawal_requests: 0,
                 };
             }
-            const available = roundCurrency(Number(w.available_balance || 0));
-            const pendingReqs = roundCurrency(pendingByCollection.get(c.id) || 0);
-            const cap = roundCurrency(Math.max(0, available - pendingReqs));
+
+            const colContributions = contributionsByCollection.get(c.id) || [];
+            const colWithdrawals = withdrawalsByCollection.get(c.id) || [];
+
+            // Compute the live balances from source of truth!
+            const balances = computeWalletBalances(colContributions, colWithdrawals);
+
+            // Compute pending withdrawals (status in "pending" or "processing")
+            const pendingReqs = roundCurrency(
+                colWithdrawals
+                    .filter((row) => PENDING_WITHDRAWAL_STATUSES.includes(String(row.status || "")))
+                    .reduce((sum, row) => sum + Number(row.amount || 0), 0)
+            );
+
+            const cap = roundCurrency(Math.max(0, balances.availableBalance - pendingReqs));
+
             return {
                 ...c,
                 wallet_id: w.id,
-                available_balance: available,
-                pending_balance: roundCurrency(Number(w.pending_balance || 0)),
-                ledger_balance: roundCurrency(Number(w.ledger_balance || 0)),
+                available_balance: balances.availableBalance,
+                pending_balance: balances.pendingBalance,
+                ledger_balance: balances.ledgerBalance,
                 pending_withdrawal_requests: pendingReqs,
                 withdrawable_amount: cap,
             };

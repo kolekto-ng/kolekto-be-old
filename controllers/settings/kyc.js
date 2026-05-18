@@ -31,15 +31,20 @@ function sha256(value) {
 export const uploadDocument = async (req, res, next) => {
     const insertedDocs = [];
     const uploadedPaths = [];
+    let previousKycStatus = null;
 
     try {
         const userId = req.user.id;
-        const { documentType, verificationType } = req.body;
+        const { documentType, verificationType, nin } = req.body;
         const uploadedFiles = req.files;
-        console.log("Files received:", uploadedFiles, userId, documentType, verificationType);
+        console.log("Files received:", uploadedFiles, userId, documentType, verificationType, nin ? "NIN Provided" : "No NIN");
 
         if (!userId || !documentType || !verificationType) {
             return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        if (documentType === 'identity' && nin && !/^\d{11}$/.test(nin)) {
+            return res.status(400).json({ error: "NIN must be exactly 11 digits" });
         }
 
         if (!uploadedFiles || uploadedFiles.length === 0) {
@@ -48,7 +53,6 @@ export const uploadDocument = async (req, res, next) => {
 
         // 0️⃣ Ensure KYC verification record exists and is pending
         let kycVerificationId;
-        let previousKycStatus = null;
 
         const { data: existingKyc, error: kycError } = await supabase
             .from("kyc_verifications")
@@ -126,6 +130,64 @@ export const uploadDocument = async (req, res, next) => {
             }]);
 
             if (fileError) throw new Error(`Failed to insert kyc_files: ${fileError.message}`);
+        }
+
+        // 3️⃣ If NIN is provided, encrypt and save it to user_identity
+        if (documentType === 'identity' && nin) {
+            const ENCRYPTION_KEY = process.env.ACCOUNT_ENCRYPTION_KEY;
+            const IV_LENGTH = 16;
+            let ninCipher = null;
+            if (ENCRYPTION_KEY) {
+                const crypto = await import("node:crypto");
+                const aesKey = crypto.createHash("sha256").update(ENCRYPTION_KEY).digest();
+                const iv = crypto.randomBytes(IV_LENGTH);
+                const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, iv);
+                let encrypted = cipher.update(nin);
+                encrypted = Buffer.concat([encrypted, cipher.final()]);
+                ninCipher = Buffer.concat([iv, encrypted]).toString('hex');
+            }
+
+            const cryptoMod = await import("node:crypto");
+            const ninHash = cryptoMod.createHash("sha256").update(nin).digest("hex");
+            const ninLast4 = nin.slice(-4);
+
+            const identityPayload = {
+                user_id: userId,
+                nin_hash: ninHash,
+                nin_last4: ninLast4,
+                ...(ninCipher ? { nin_cipher: ninCipher } : {}),
+                updated_at: new Date().toISOString(),
+            };
+
+            const { data: existingIdentity, error: lookupError } = await supabase
+                .from("user_identity")
+                .select("id")
+                .eq("user_id", userId)
+                .order("created_at", { ascending: true })
+                .limit(1)
+                .maybeSingle();
+
+            if (lookupError) throw lookupError;
+
+            if (existingIdentity?.id) {
+                const { error: updateError } = await supabase
+                    .from("user_identity")
+                    .update(identityPayload)
+                    .eq("id", existingIdentity.id);
+
+                if (updateError) throw updateError;
+            } else {
+                const { error: insertError } = await supabase
+                    .from("user_identity")
+                    .insert({
+                        ...identityPayload,
+                        bvn_hash: cryptoMod.createHash("sha256").update(`__BVN_PENDING__:${userId}`).digest("hex"),
+                        bvn_last4: "",
+                        bvn_cipher: "",
+                    });
+
+                if (insertError) throw insertError;
+            }
         }
 
         return res.json({
@@ -273,7 +335,7 @@ export const saveNIN = async (req, res) => {
                 .from("user_identity")
                 .insert({
                     ...identityPayload,
-                    bvn_hash: "",
+                    bvn_hash: cryptoMod.createHash("sha256").update(`__BVN_PENDING__:${userId}`).digest("hex"),
                     bvn_last4: "",
                     bvn_cipher: "",
                 });
