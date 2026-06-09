@@ -10,7 +10,7 @@ import {
     roundCurrency,
 } from "../utils/financial.js";
 
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
 
 /**

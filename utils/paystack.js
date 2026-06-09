@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 
 // Axios instance for Paystack
 const paystackApi = axios.create({

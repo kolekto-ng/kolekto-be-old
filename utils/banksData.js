@@ -1,8 +1,10 @@
 import axios from "axios";
 
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
+
 // Helper to set headers
 const paystackHeaders = {
-    Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+    Authorization: `Bearer ${PAYSTACK_SECRET}`,
     "Content-Type": "application/json"
 };
 
