@@ -1,3 +1,7 @@
+// ⚠️ DEPRECATED — DO NOT IMPORT
+// Uses CommonJS `module.exports` in an ESM project, and references an
+// undefined `supabase`. The real auth middleware is `utils/verifyToken.js`
+// (used everywhere in routes/*). Delete in a follow-up cleanup PR.
 
 const authMiddleware = async (req, res, next) => {
     const token = req.headers['authorization'];

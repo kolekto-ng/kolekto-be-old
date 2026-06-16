@@ -19,6 +19,20 @@ const createTransporter = () => {
     });
 };
 
+// const createTransporter = () => {
+//     return nodemailer.createTransport({
+//         host: 'smtp.zoho.com',
+//         port: 587,
+//         secure: false, // MUST be false for 587
+//         auth: {
+//             user: process.env.ZOHO_EMAIL,
+//             pass: process.env.ZOHO_APP_PASSWORD,
+//         },
+//         tls: {
+//             rejectUnauthorized: false
+//         }
+//     });
+// };
 // Verify transporter configuration
 export const verifyEmailConfig = async () => {
     try {

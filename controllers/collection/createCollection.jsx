@@ -1,3 +1,7 @@
+// ⚠️ DEPRECATED — DO NOT IMPORT
+// Stray `.jsx` file in a backend Node project. Never imported (grep verified).
+// The active implementation is `controllers/collection.js`. Delete in a
+// follow-up cleanup PR.
 import { supabase } from '../utils/client.js';
 
 // controllers/collections.js

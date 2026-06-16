@@ -7,7 +7,6 @@ const router = express.Router();
 
 // settings routes - add multer middleware
 router.post("/upload-avatar", verifyToken, upload.single("avatar"), uploadAvatar);
-router.post("/save-payout-account", verifyToken, uploadAvatar);
 
 import {
     fetchBanks,
@@ -22,7 +21,7 @@ router.get("/banks", fetchBanks);
 router.post("/verify-account", verifyBankAccount);
 router.post("/save-account", verifyToken, saveAccount);
 router.get("/payout-accounts", verifyToken, getAccounts);
-router.post("/set-default", setDefaultAccount);
+router.post("/set-default", verifyToken, setDefaultAccount);
 
 
 export default router;
