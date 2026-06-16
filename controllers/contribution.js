@@ -52,7 +52,8 @@ export const getSingleCollection = async (req, res) => {
                 currency,
                 currency_symbol
             )
-        `);
+        `)
+        .limit(1);
 
     // If it looks like a UUID, use ID; otherwise use slug
     if (uuidRegex.test(identifier)) {
@@ -101,7 +102,8 @@ export const createContribution = async (req, res) => {
 
         let collectionQuery = supabase
             .from("collections")
-            .select("*");
+            .select("*")
+            .limit(1);
 
         // If it looks like a UUID, use ID; otherwise use slug
         if (uuidRegex.test(collectionId)) {

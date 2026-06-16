@@ -97,7 +97,7 @@ app.use("/api/adminurlabdkole", adminRouter);
 // F5: admin reconcile-payment endpoint.
 app.use("/api/adminurlabdkole", adminPaymentsRouter);
 
-const port = process.env.PORT || 5050;
+const port = process.env.PORT || 3000;
 
 app.set('trust proxy', true);
 
@@ -111,7 +111,7 @@ const initializeEmailService = async () => {
     }
 };
 
-app.listen(port, async () => {
+app.listen(port, '0.0.0.0', async () => {
     console.log(`Server Running on port ${port}`);
     // Initialize email service on startup, but don't block the API in dev
     if (process.env.NODE_ENV === "production") {
