@@ -4,35 +4,35 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // Create reusable transporter object using Zoho SMTP
-// const createTransporter = () => {
-//     return nodemailer.createTransport({
-//         host: process.env.ZOHO_SMTP_HOST || 'smtp.zoho.com',
-//         port: parseInt(process.env.ZOHO_SMTP_PORT || '587'),
-//         secure: process.env.ZOHO_SMTP_SECURE === 'true', // true for 465, false for other ports
-//         auth: {
-//             user: process.env.ZOHO_EMAIL, // Your Zoho email address
-//             pass: process.env.ZOHO_APP_PASSWORD, // Zoho App Password (not your regular password)
-//         },
-//         tls: {
-//             rejectUnauthorized: false // For development, set to true in production
-//         }
-//     });
-// };
-
 const createTransporter = () => {
     return nodemailer.createTransport({
-        host: 'smtp.zoho.com',
-        port: 587,
-        secure: false, // MUST be false for 587
+        host: process.env.ZOHO_SMTP_HOST || 'smtp.zoho.com',
+        port: parseInt(process.env.ZOHO_SMTP_PORT || '587'),
+        secure: process.env.ZOHO_SMTP_SECURE === 'true', // true for 465, false for other ports
         auth: {
-            user: process.env.ZOHO_EMAIL,
-            pass: process.env.ZOHO_APP_PASSWORD,
+            user: process.env.ZOHO_EMAIL, // Your Zoho email address
+            pass: process.env.ZOHO_APP_PASSWORD, // Zoho App Password (not your regular password)
         },
         tls: {
-            rejectUnauthorized: true
+            rejectUnauthorized: false // For development, set to true in production
         }
     });
 };
+
+// const createTransporter = () => {
+//     return nodemailer.createTransport({
+//         host: 'smtp.zoho.com',
+//         port: 587,
+//         secure: false, // MUST be false for 587
+//         auth: {
+//             user: process.env.ZOHO_EMAIL,
+//             pass: process.env.ZOHO_APP_PASSWORD,
+//         },
+//         tls: {
+//             rejectUnauthorized: false
+//         }
+//     });
+// };
 // Verify transporter configuration
 export const verifyEmailConfig = async () => {
     try {

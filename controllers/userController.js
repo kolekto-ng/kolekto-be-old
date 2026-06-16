@@ -1,3 +1,8 @@
+// ⚠️ DEPRECATED — DO NOT IMPORT
+// This module is never imported (grep verified). It references a missing
+// `../services/supabaseClient` file, has unawaited Supabase calls, and refers
+// to an undeclared `error` variable on line 35. Auth lives in
+// `controllers/auth.js`. Delete in a follow-up cleanup PR.
 import { supabase } from '../services/supabaseClient';
 import { getClientIp } from '../utils/getCientIP';
 import { checkBlockedIp } from '../utils/checkBlockedIp';

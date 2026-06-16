@@ -1,4 +1,5 @@
 import { supabase } from "../utils/client.js";
+import { calculateFees } from "../utils/financial.js";
 
 // Get contributions, optionally filtered by collectionId
 export const getContributions = async (req, res) => {
@@ -42,6 +43,7 @@ export const getSingleCollection = async (req, res) => {
             wallets (
                 id,
                 available_balance,
+                pending_balance,
                 ledger_balance,
                 gross_payment,
                 net_payment,
@@ -119,12 +121,19 @@ export const createContribution = async (req, res) => {
         // Use the actual collection ID from the fetched collection
         const actualCollectionId = collection.id;
 
-        const { type: collection_type, fee_bearer, price_tiers, amount: collectionAmount } = collection;
+        const { collection_type: col_type_new, type: col_type_old, fee_bearer, price_tiers, amount: collectionAmount } = collection;
         console.log(collection, '<< collection details');
 
-        let collectionType = collection_type || "fixed";
+        // Use collection_type column first (new wizard), fall back to type column (legacy)
+        let collectionType = col_type_new || col_type_old || "fixed";
         let parsedAmount = null;
         let amountBreakdown = {};
+
+        // B-13: All fee math routes through calculateFees(). The breakdown
+        // shape preserves the legacy field names (paymentGatewayFee) so the
+        // host FE and admin panel see exactly the same payload they did
+        // before.
+        const resolvedFeeBearer = fee_bearer || "organizer";
 
         // ✅ Step 3: Handle contribution depending on collection type
         if (collectionType === "tiered") {
@@ -148,62 +157,44 @@ export const createContribution = async (req, res) => {
                 return res.status(400).json({ error: `Invalid tier price for "${selectedTier.name}"` });
             }
 
-            // Fee calculation
-            let kolektoFee = Math.min(tierPrice * 0.005, 2000); // 0.5% capped ₦2,000
-            let gatewayFee = Math.min(tierPrice * 0.015, 2000); // 1.5% capped ₦2,000
-            const totalFees = kolektoFee + gatewayFee;
+            const { platformFee, gatewayFee, totalFees, totalPayable } =
+                calculateFees(tierPrice, "tiered", resolvedFeeBearer);
 
             amountBreakdown = {
                 type: "tiered", // keep "tiered" if frontend depends on it
                 tier: {
                     name: selectedTier.name,
                     basePrice: tierPrice,
-                    fee_bearer: fee_bearer || "organizer",
-                    platformFee: kolektoFee,
+                    fee_bearer: resolvedFeeBearer,
+                    platformFee,
                     paymentGatewayFee: gatewayFee,
                     totalFees,
-                    totalPayable:
-                        fee_bearer === "contributor"
-                            ? tierPrice + totalFees
-                            : tierPrice,
+                    totalPayable,
                 },
             };
 
-            parsedAmount = amountBreakdown.tier.totalPayable;
+            parsedAmount = totalPayable;
 
         } else if (collectionType === "fixed") {
-            // ✅ Fixed contribution
-
             if (isNaN(collectionAmount) || collectionAmount <= 100) {
                 return res.status(400).json({ error: "Collection amount must be greater than ₦100" });
             }
-            parsedAmount = collectionAmount;
 
-
-            // Base amount is always the collection's set amount
-
-            // Fee calculation
-            let kolektoFee = Math.min(parsedAmount * 0.005, 2000); // 0.5% capped ₦2,000
-            let gatewayFee = Math.min(parsedAmount * 0.015, 2000); // 1.5% capped ₦2,000
-            const totalFees = kolektoFee + gatewayFee;
+            const { platformFee, gatewayFee, totalFees, totalPayable } =
+                calculateFees(collectionAmount, "fixed", resolvedFeeBearer);
 
             amountBreakdown = {
                 type: "fixed",
-                baseAmount: parsedAmount,            // <- always collection’s fixed amount
-                fee_bearer: fee_bearer || "organizer",
-                platformFee: kolektoFee,
+                baseAmount: collectionAmount,        // collection's fixed amount
+                fee_bearer: resolvedFeeBearer,
+                platformFee,
                 paymentGatewayFee: gatewayFee,
                 totalFees,
-                totalPayable:
-                    fee_bearer === "contributor"
-                        ? parsedAmount + totalFees
-                        : parsedAmount,
+                totalPayable,
             };
 
             // ✅ final amount contributor should pay
-            parsedAmount = amountBreakdown.totalPayable;
-
-            console.log({ parsedAmount, kolektoFee, gatewayFee, totalFees }, "<< breakdown");
+            parsedAmount = totalPayable;
         }
 
 
@@ -224,12 +215,37 @@ export const createContribution = async (req, res) => {
             }
         }
         if (collectionType === 'fundraising') {
-            console.log('fundraising fee calculation', amount);
-
-            parsedAmount = parseFloat(amount + (amount * 0.025)); // minimum ₦100
-
+            const numericAmount = parseFloat(amount);
+            if (isNaN(numericAmount) || numericAmount <= 100) {
+                return res.status(400).json({ error: "Donation amount must be greater than ₦100" });
+            }
+            // B-13: Replace the hardcoded 0.025 (1% platform + 1.5% gateway,
+            // contributor-borne) with calculateFees. This stays in sync with
+            // utils/financial.js if rates change, and respects the ₦2,000 fee
+            // cap that the old hardcoded math silently ignored.
+            const { totalPayable } = calculateFees(numericAmount, "fundraising", "contributor");
+            parsedAmount = totalPayable;
+        } else if (collectionType === 'open_pool') {
+            const numericAmount = parseFloat(amount);
+            if (isNaN(numericAmount) || numericAmount <= 0) {
+                return res.status(400).json({ error: "Contribution amount must be greater than ₦0" });
+            }
+            parsedAmount = numericAmount;
+        } else if (collectionType === 'ticket') {
+            // amount from frontend already includes quantity × price (and fees if contributor-borne)
+            const numericAmount = parseFloat(amount);
+            if (isNaN(numericAmount) || numericAmount <= 0) {
+                return res.status(400).json({ error: "Invalid ticket amount" });
+            }
+            parsedAmount = numericAmount;
         }
-        console.log(parsedAmount, 'parsd amo');
+        console.log(parsedAmount, 'parsd amo', collectionType);
+
+        // Final safety check: parsedAmount must be a positive number
+        if (parsedAmount === null || parsedAmount === undefined || isNaN(parsedAmount) || parsedAmount <= 0) {
+            console.error('parsedAmount is null/invalid for type:', collectionType, 'amount:', amount, 'collectionAmount:', collectionAmount);
+            return res.status(400).json({ error: `Could not determine contribution amount for collection type "${collectionType}". Please contact support.` });
+        }
 
         // Insert contributor
         const { data: contributorData, error: contributorError } = await supabase
