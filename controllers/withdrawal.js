@@ -2,7 +2,7 @@ import axios from "axios";
 import crypto from "crypto";
 import { supabase } from "../utils/client.js";
 import { sendEmail } from "../services/emailService.js";
-import { computeWalletBalances, roundCurrency } from "../utils/financial.js";
+import { computeWalletBalances, roundCurrency, normalizeContributions } from "../utils/financial.js";
 import { withdrawalRequestTemplate } from "../templates/withdrawalRequest.js";
 import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawalApprovalRequest.js";
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
@@ -131,13 +131,17 @@ function decryptAccountNumber(cipherValue) {
 
 /**
  * Recompute wallet balances from source of truth and persist them.
- * Called after any withdrawal state change.
  */
 async function refreshWallet(walletId, collectionId) {
-    const [{ data: contributions }, { data: withdrawals }] = await Promise.all([
+    const [{ data: collection }, { data: contributions }, { data: withdrawals }] = await Promise.all([
+        supabase
+            .from("collections")
+            .select("fee_bearer, collection_type")
+            .eq("id", collectionId)
+            .single(),
         supabase
             .from("contributions")
-            .select("amount, created_at")
+            .select("amount, gross_amount, created_at")
             .eq("collection_id", collectionId)
             .eq("status", "paid"),
         supabase
@@ -146,7 +150,13 @@ async function refreshWallet(walletId, collectionId) {
             .eq("collection_id", collectionId),
     ]);
 
-    const balances = computeWalletBalances(contributions || [], withdrawals || []);
+    const normalized = normalizeContributions(
+        contributions || [],
+        collection?.fee_bearer || "organizer",
+        collection?.collection_type || "fixed"
+    );
+
+    const balances = computeWalletBalances(normalized, withdrawals || []);
 
     await supabase
         .from("wallets")
@@ -236,7 +246,7 @@ export const getEligibleCollections = async (req, res) => {
     try {
         const { data: collections, error: colErr } = await supabase
             .from("collections")
-            .select("id, title, currency, currency_symbol")
+            .select("id, title, currency, currency_symbol, fee_bearer, collection_type")
             .eq("user_id", userId);
 
         if (colErr) {
@@ -321,8 +331,14 @@ export const getEligibleCollections = async (req, res) => {
             const colContributions = contributionsByCollection.get(c.id) || [];
             const colWithdrawals = withdrawalsByCollection.get(c.id) || [];
 
+            const normalizedContribs = normalizeContributions(
+                colContributions,
+                c.fee_bearer || "organizer",
+                c.collection_type || "fixed"
+            );
+
             // Compute the live balances from source of truth!
-            const balances = computeWalletBalances(colContributions, colWithdrawals);
+            const balances = computeWalletBalances(normalizedContribs, colWithdrawals);
 
             // Compute pending withdrawals (status in "pending" or "processing")
             const pendingReqs = roundCurrency(
