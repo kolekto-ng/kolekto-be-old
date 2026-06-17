@@ -8,6 +8,7 @@ import {
     calculateFees,
     computeWalletBalances,
     roundCurrency,
+    normalizeContributions,
 } from "../utils/financial.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
@@ -312,12 +313,17 @@ export async function updateWalletStats(collectionId, grossAmountPaid) {
             );
             return;
         }
-
         // Pull everything we need to compute the canonical balances.
         const [
+            { data: collection, error: colError },
             { data: contributions, error: contribError },
             { data: withdrawals, error: withError },
         ] = await Promise.all([
+            supabase
+                .from("collections")
+                .select("fee_bearer, collection_type")
+                .eq("id", collectionId)
+                .single(),
             supabase
                 .from("contributions")
                 .select("amount, gross_amount, created_at")
@@ -329,15 +335,21 @@ export async function updateWalletStats(collectionId, grossAmountPaid) {
                 .eq("collection_id", collectionId),
         ]);
 
-        if (contribError || withError) {
+        if (colError || contribError || withError) {
             console.error(
                 "[updateWalletStats] source fetch failed:",
-                (contribError || withError)?.message
+                (colError || contribError || withError)?.message
             );
             return;
         }
 
-        const balances = computeWalletBalances(contributions || [], withdrawals || []);
+        const normalized = normalizeContributions(
+            contributions || [],
+            collection?.fee_bearer || "organizer",
+            collection?.collection_type || "fixed"
+        );
+
+        const balances = computeWalletBalances(normalized, withdrawals || []);
 
         const { error: updateError } = await supabase
             .from("wallets")
