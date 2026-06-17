@@ -253,19 +253,19 @@ export function computeWalletBalances(paidContributions, withdrawals) {
  */
 export function normalizeContributions(contributions, feeBearer = "organizer", collectionType = "fixed") {
     return (contributions || []).map((row) => {
-        const grossAmount = Number(row.gross_amount || 0);
-        if (grossAmount === 0) {
-            // Legacy row: row.amount is the gross amount paid by the contributor
-            const gross = Number(row.amount || 0);
-            const { totalFees } = calculateFees(gross, collectionType, feeBearer);
-            const net = feeBearer === "organizer" ? roundCurrency(gross - totalFees) : gross;
-            return {
-                ...row,
-                amount: net,
-                gross_amount: gross,
-            };
-        }
-        return row;
+        const gross = Number(row.gross_amount || row.amount || 0);
+        if (gross === 0) return row;
+
+        const { totalFees } = calculateFees(gross, collectionType, feeBearer);
+        const net = feeBearer === "organizer"
+            ? roundCurrency(gross - totalFees)
+            : deriveNetContribution(gross, collectionType, feeBearer);
+
+        return {
+            ...row,
+            amount: net,
+            gross_amount: gross,
+        };
     });
 }
 
