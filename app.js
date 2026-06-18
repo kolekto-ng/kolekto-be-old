@@ -14,6 +14,8 @@ import securityRouter from "./routes/settings/security.js";
 import landingPageRouter from "./routes/landingPage.js";
 import adminRouter from "./routes/admin/kyc.js";
 import adminPaymentsRouter from "./routes/admin/payments.js";
+import ambassadorRouter from "./routes/ambassador.js";
+import adminAmbassadorsRouter from "./routes/admin/ambassadors.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
 import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
@@ -41,6 +43,9 @@ app.use(
             "kolekto-fe.vercel.app",
             "https://kolekto.com.ng",
             "kolekto.com.ng",
+            "https://ambassador.kolekto.com",
+            "https://ambassador.kolekto.com.ng",
+            "http://localhost:5175",
         ],
         credentials: true, // Allow credentials (cookies) to be sent
     })
@@ -92,10 +97,12 @@ app.use("/api/settings/profile", profileRouter);
 app.use("/api/settings/kyc", kycRouter);
 app.use("/api/settings/security", securityRouter);
 app.use("/api/landing-page", landingPageRouter);
+app.use("/api/ambassadors", ambassadorRouter);
 app.use("/api/adminurlabdkole", adminRouter);
 // Same admin prefix — Express composes multiple routers on the same mount.
 // F5: admin reconcile-payment endpoint.
 app.use("/api/adminurlabdkole", adminPaymentsRouter);
+app.use("/api/adminurlabdkole", adminAmbassadorsRouter);
 
 const port = process.env.PORT || 5050;
 
