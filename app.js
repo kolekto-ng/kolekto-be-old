@@ -14,9 +14,11 @@ import securityRouter from "./routes/settings/security.js";
 import landingPageRouter from "./routes/landingPage.js";
 import adminRouter from "./routes/admin/kyc.js";
 import adminPaymentsRouter from "./routes/admin/payments.js";
+import pushRouter from "./routes/push.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
 import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
+import "./jobs/pushNotifications.js"; // registers push notification reminder/deadline jobs
 // Imported directly so we can mount the webhook route with a RAW body parser
 // before the global JSON parser. See B-1 below.
 import { handleWebhook } from "./controllers/deposit.js";
@@ -91,6 +93,7 @@ app.use("/api/withdrawals", withdrawalRouter);
 app.use("/api/settings/profile", profileRouter);
 app.use("/api/settings/kyc", kycRouter);
 app.use("/api/settings/security", securityRouter);
+app.use("/api/push", pushRouter);
 app.use("/api/landing-page", landingPageRouter);
 app.use("/api/adminurlabdkole", adminRouter);
 // Same admin prefix — Express composes multiple routers on the same mount.

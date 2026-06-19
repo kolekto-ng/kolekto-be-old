@@ -8,6 +8,7 @@ import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawal
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
 import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
 import { listAdminEmails } from "../utils/requireAdmin.js";
+import { notifyWithdrawalProcessed, notifyWithdrawalRejected, notifyWithdrawalRequested } from "../utils/pushNotifications.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 
@@ -659,6 +660,12 @@ export const requestWithdrawal = async (req, res) => {
             .eq("id", userId)
             .single();
 
+        await notifyWithdrawalRequested({
+            userId,
+            withdrawalId: insertedWithdrawal.id,
+            amount: withdrawalAmount,
+        });
+
         // Fire-and-forget email notifications
         (async () => {
             try {
@@ -934,6 +941,12 @@ export const approveWithdrawal = async (req, res) => {
     // Recompute all balances from source of truth
     const balances = await refreshWallet(wallet.id, withdrawal.collection_id);
 
+    await notifyWithdrawalProcessed({
+        userId: withdrawal.user_id,
+        withdrawalId: withdrawal.id,
+        amount: withdrawal.amount,
+    });
+
     // Fire-and-forget email notifications
     (async () => {
         try {
@@ -1042,6 +1055,12 @@ export const rejectWithdrawal = async (req, res) => {
         .from("withdrawals")
         .update({ status: "rejected" })
         .eq("id", withdrawal.id);
+
+    await notifyWithdrawalRejected({
+        userId: withdrawal.user_id,
+        withdrawalId: withdrawal.id,
+        amount: withdrawal.amount,
+    });
 
     return res.status(200).json({ success: true, message: "Withdrawal rejected and available balance refunded successfully" });
 };

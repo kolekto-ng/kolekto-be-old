@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { supabase } from "../../utils/client.js";
 import { createRecipient, getBanks, verifyAccount } from "../../utils/paystack.js";
+import { notifyBankAccountAdded } from "../../utils/pushNotifications.js";
 
 
 export const getProfile = async (req, res, next) => {
@@ -353,6 +354,8 @@ export const saveAccount = async (req, res) => {
 
             if (updateError) throw updateError;
 
+            await notifyBankAccountAdded({ userId: user_id, bankName: bank_name, repaired: true });
+
             return res.status(200).json({
                 ...updatedAccount,
                 repaired: true
@@ -377,6 +380,8 @@ export const saveAccount = async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        await notifyBankAccountAdded({ userId: user_id, bankName: bank_name, repaired: false });
 
         res.status(201).json({
             ...data,

@@ -4,6 +4,7 @@ import { createContribution } from "./contribution.js";
 import crypto from "node:crypto";
 import { sendEmail } from "../services/emailService.js";
 import { sendPaymentInitialize, sendPaymentConfirmation } from "../utils/emailHelper.js";
+import { notifyContributionByReference } from "../utils/pushNotifications.js";
 import {
     calculateFees,
     computeWalletBalances,
@@ -1074,6 +1075,8 @@ export const verifyPayment = async (req, res) => {
                     }).catch((err) =>
                         console.error("Organizer email send error:", err?.message || err)
                     );
+
+                    await notifyContributionByReference(reference);
                 }
             } catch (e) {
                 console.error("Organizer notification update error:", e?.message || e);
@@ -1533,6 +1536,8 @@ export const handleWebhook = async (req, res) => {
                 }).catch((err) =>
                     console.error("Organizer email send error:", err?.message || err)
                 );
+
+                await notifyContributionByReference(reference);
             }
         } catch (e) {
             console.error("Organizer notification update error:", e?.message || e);
@@ -1679,6 +1684,7 @@ export const sendReceiptNotification = async (req, res) => {
                           </div>`,
                     });
                     console.log("[sendReceiptNotification] ✅ Organizer email sent to", organizer.email);
+                    await notifyContributionByReference(transactionRef);
                 }
             }
         } catch (err) {
