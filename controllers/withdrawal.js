@@ -806,6 +806,11 @@ export const handlePaystackWebhook = async (req, res) => {
 
             // Recompute balances from source of truth
             await refreshWallet(wallet.id, withdrawal.collection_id);
+            await notifyWithdrawalProcessed({
+                userId: withdrawal.user_id,
+                withdrawalId: withdrawal.id,
+                amount: withdrawal.amount,
+            });
 
         } else if (event === "transfer.failed" || event === "transfer.reversed") {
             const newStatus = event === "transfer.failed" ? "failed" : "reversed";
@@ -817,6 +822,11 @@ export const handlePaystackWebhook = async (req, res) => {
             // Refund available_balance since withdrawal won't proceed
             // Then recompute from source of truth
             await refreshWallet(wallet.id, withdrawal.collection_id);
+            await notifyWithdrawalRejected({
+                userId: withdrawal.user_id,
+                withdrawalId: withdrawal.id,
+                amount: withdrawal.amount,
+            });
         }
     }
 

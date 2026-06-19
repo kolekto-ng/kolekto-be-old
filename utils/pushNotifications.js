@@ -430,6 +430,24 @@ export async function notifyCollectionMilestones(collectionId, { reference } = {
             );
         }
 
+        if (maxContributions > 0 && paidCount >= Math.ceil(maxContributions * 0.8) && paidCount < maxContributions) {
+            await sendPushToUser(
+                collection.user_id,
+                {
+                    title: "Collection is almost full",
+                    body: `${compactText(collection.title, "Your collection")} has reached ${paidCount} of ${maxContributions} contributions.`,
+                    type: "info",
+                    tag: `collection-limit-80-${collection.id}`,
+                    id: collection.id,
+                    url: `/dashboard/collections/${collection.id}`,
+                },
+                {
+                    type: "collection_limit_80_percent",
+                    dedupeKey: `collection-limit-80:${collection.id}`,
+                }
+            );
+        }
+
         if (maxContributions > 0 && paidCount >= maxContributions) {
             await sendPushToUser(
                 collection.user_id,

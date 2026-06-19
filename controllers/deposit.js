@@ -4,7 +4,10 @@ import { createContribution } from "./contribution.js";
 import crypto from "node:crypto";
 import { sendEmail } from "../services/emailService.js";
 import { sendPaymentInitialize, sendPaymentConfirmation } from "../utils/emailHelper.js";
-import { notifyContributionByReference } from "../utils/pushNotifications.js";
+import {
+    notifyContributionByReference,
+    notifyPaymentIssue,
+} from "../utils/pushNotifications.js";
 import {
     calculateFees,
     computeWalletBalances,
@@ -924,6 +927,24 @@ export const verifyPayment = async (req, res) => {
 
         if (depositError) {
             return res.status(500).json({ error: depositError.message });
+        }
+
+        if (deposit && deposit.collection_id && paystackData.status !== "success") {
+            const { data: collection } = await supabase
+                .from("collections")
+                .select("id, title, user_id")
+                .eq("id", deposit.collection_id)
+                .maybeSingle();
+
+            if (collection?.user_id) {
+                await notifyPaymentIssue({
+                    userId: collection.user_id,
+                    collectionId: collection.id,
+                    collectionTitle: collection.title,
+                    reference,
+                    status: paystackData.status,
+                });
+            }
         }
 
         if (deposit && deposit.contributor_id && paystackData.status === "success") {
