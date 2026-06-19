@@ -54,6 +54,9 @@ function buildPayload(payload) {
         type: payload.type || "info",
         tag: payload.tag || payload.type || "kolekto-update",
         id: payload.id || null,
+        collectionId: payload.collectionId || null,
+        contributionId: payload.contributionId || null,
+        transactionReference: payload.transactionReference || null,
         url: appUrl(payload.url || "/dashboard"),
         renotify: Boolean(payload.renotify),
     };
@@ -131,11 +134,20 @@ export async function removePushSubscription(userId, endpoint) {
 }
 
 export async function sendPushToUser(userId, payload, options = {}) {
-    try {
-        if (!userId || !configureWebPush()) return { sent: 0, skipped: true };
+    const eventType = options.type || payload.type || "general";
+    const dedupeKey = options.dedupeKey || null;
 
-        const claimed = await claimNotificationEvent(userId, options.type || payload.type, options.dedupeKey);
-        if (!claimed) return { sent: 0, duplicate: true };
+    try {
+        if (!userId || !configureWebPush()) {
+            console.warn("[push] skipped: missing user or VAPID config", { userId, eventType, dedupeKey });
+            return { sent: 0, skipped: true };
+        }
+
+        const claimed = await claimNotificationEvent(userId, eventType, dedupeKey);
+        if (!claimed) {
+            console.log("[push] duplicate suppressed", { userId, eventType, dedupeKey });
+            return { sent: 0, duplicate: true };
+        }
 
         const { data: subscriptions, error } = await supabase
             .from("push_subscriptions")
@@ -143,10 +155,15 @@ export async function sendPushToUser(userId, payload, options = {}) {
             .eq("user_id", userId);
 
         if (error) throw error;
-        if (!subscriptions?.length) return { sent: 0 };
+        if (!subscriptions?.length) {
+            console.log("[push] no subscriptions for user", { userId, eventType, dedupeKey });
+            return { sent: 0 };
+        }
 
         const notification = buildPayload(payload);
         let sent = 0;
+        let removed = 0;
+        let failed = 0;
 
         await Promise.all(
             subscriptions.map(async (row) => {
@@ -165,30 +182,51 @@ export async function sendPushToUser(userId, payload, options = {}) {
                 } catch (error) {
                     if (isInvalidSubscriptionError(error)) {
                         await supabase.from("push_subscriptions").delete().eq("id", row.id);
+                        removed += 1;
+                        console.log("[push] removed expired subscription", { userId, subscriptionId: row.id });
                         return;
                     }
+                    failed += 1;
                     console.warn("[push] send failed:", error?.message || error);
                 }
             })
         );
 
+        console.log("[push] send complete", {
+            userId,
+            eventType,
+            dedupeKey,
+            subscriptions: subscriptions.length,
+            sent,
+            failed,
+            removed,
+        });
+
         return { sent };
     } catch (error) {
-        console.warn("[push] notification skipped:", error?.message || error);
+        console.warn("[push] notification skipped:", {
+            userId,
+            eventType,
+            dedupeKey,
+            error: error?.message || error,
+        });
         return { sent: 0, error };
     }
 }
 
-export async function notifyContributionPaid({ organizerId, collectionId, collectionTitle, contributorName, amount, reference }) {
+export async function notifyContributionPaid({ organizerId, collectionId, contributionId, collectionTitle, contributorName, amount, reference }) {
     return sendPushToUser(
         organizerId,
         {
             title: "New contribution received",
             body: `${compactText(contributorName, "A contributor")} paid ${formatNaira(amount)} for ${compactText(collectionTitle, "your collection")}.`,
-            type: "success",
+            type: "contribution_paid",
             tag: `contribution-${reference || collectionId}`,
-            id: reference || collectionId,
-            url: `/dashboard/collections/${collectionId}`,
+            id: contributionId || reference || collectionId,
+            collectionId,
+            contributionId: contributionId || null,
+            transactionReference: reference || null,
+            url: `/collections/${collectionId}`,
         },
         { type: "contribution_paid", dedupeKey: reference ? `contribution-paid:${reference}` : null }
     );
@@ -198,12 +236,13 @@ export async function notifyContributionByReference(reference) {
     try {
         if (!reference) return;
 
-        const { data: contribution } = await supabase
+        const { data: contributions } = await supabase
             .from("contributions")
             .select("id, name, amount, gross_amount, collection_id, payment_reference")
             .eq("payment_reference", reference)
-            .limit(1)
-            .maybeSingle();
+            .order("created_at", { ascending: true });
+
+        const contribution = contributions?.[0];
 
         if (!contribution?.collection_id) return;
 
@@ -215,18 +254,26 @@ export async function notifyContributionByReference(reference) {
 
         if (!collection?.user_id) return;
 
-        await notifyContributionPaid({
+        const totalAmount = (contributions || []).reduce(
+            (sum, row) => sum + Number(row.gross_amount || row.amount || 0),
+            0
+        );
+
+        const result = await notifyContributionPaid({
             organizerId: collection.user_id,
             collectionId: collection.id,
+            contributionId: contribution.id,
             collectionTitle: collection.title,
             contributorName: contribution.name,
-            amount: contribution.gross_amount || contribution.amount,
+            amount: totalAmount || contribution.gross_amount || contribution.amount,
             reference,
         });
 
         await notifyCollectionMilestones(collection.id, { reference });
+        return result;
     } catch (error) {
         console.warn("[push] contribution notification skipped:", error?.message || error);
+        return { sent: 0, error };
     }
 }
 

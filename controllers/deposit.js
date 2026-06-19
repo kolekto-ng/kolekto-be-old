@@ -1281,6 +1281,26 @@ async function verifyPaystackSignature(req) {
     return hashHex === signature;
 }
 
+async function notifyOrganizerPushForReference(reference, source) {
+    if (!reference) return { sent: 0, skipped: true };
+
+    try {
+        const result = await notifyContributionByReference(reference);
+        console.log(`[webhook ref=${reference}] ORGANIZER_PUSH_${source}`, {
+            sent: result?.sent || 0,
+            duplicate: Boolean(result?.duplicate),
+            skipped: Boolean(result?.skipped),
+            error: result?.error?.message || null,
+        });
+        return result;
+    } catch (error) {
+        console.error(`[webhook ref=${reference}] ORGANIZER_PUSH_${source}_FAILED`, {
+            message: error?.message || error,
+        });
+        return { sent: 0, error };
+    }
+}
+
 // Handle Paystack webhook
 export const handleWebhook = async (req, res) => {
     // We expect a raw Buffer here (see app.js wiring). Parse defensively so a
@@ -1328,6 +1348,7 @@ export const handleWebhook = async (req, res) => {
                     console.log(
                         `[webhook ref=${reference}] WEBHOOK_ALREADY_PROCESSED — contribution already paid, no-op`
                     );
+                    await notifyOrganizerPushForReference(reference, "ALREADY_PAID");
                     return res
                         .status(200)
                         .send("Already processed");
@@ -1369,6 +1390,7 @@ export const handleWebhook = async (req, res) => {
                 console.log(
                     `[webhook ref=${reference}] WEBHOOK_VERIFY_RECOVERED status=${invokeResult.status}`
                 );
+                await notifyOrganizerPushForReference(reference, "VERIFY_RECOVERED");
                 return res.status(200).send("Recovered via edge function");
             }
             // Return 500 so Paystack retries — the edge function may have
@@ -1459,6 +1481,7 @@ export const handleWebhook = async (req, res) => {
 
         if (alreadyProcessed) {
             console.log("Deposit already processed by verifyPayment — wallet re-synced:", reference);
+            await notifyOrganizerPushForReference(reference, "ALREADY_PROCESSED");
             return res.status(200).send("Already processed — wallet re-synced");
         }
 
@@ -1558,11 +1581,12 @@ export const handleWebhook = async (req, res) => {
                     console.error("Organizer email send error:", err?.message || err)
                 );
 
-                await notifyContributionByReference(reference);
             }
         } catch (e) {
             console.error("Organizer notification update error:", e?.message || e);
         }
+
+        await notifyOrganizerPushForReference(reference, "LEGACY_SAVED");
 
         // F4: legacy deposits path completed
         console.log(
