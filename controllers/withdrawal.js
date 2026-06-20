@@ -8,7 +8,13 @@ import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawal
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
 import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
 import { listAdminEmails } from "../utils/requireAdmin.js";
-import { notifyWithdrawalProcessed, notifyWithdrawalRejected, notifyWithdrawalRequested } from "../utils/pushNotifications.js";
+import {
+    notifyWithdrawalApproved,
+    notifyWithdrawalFailed,
+    notifyWithdrawalProcessed,
+    notifyWithdrawalRejected,
+    notifyWithdrawalRequested,
+} from "../utils/pushNotifications.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 
@@ -822,10 +828,11 @@ export const handlePaystackWebhook = async (req, res) => {
             // Refund available_balance since withdrawal won't proceed
             // Then recompute from source of truth
             await refreshWallet(wallet.id, withdrawal.collection_id);
-            await notifyWithdrawalRejected({
+            await notifyWithdrawalFailed({
                 userId: withdrawal.user_id,
                 withdrawalId: withdrawal.id,
                 amount: withdrawal.amount,
+                status: newStatus,
             });
         }
     }
@@ -951,7 +958,7 @@ export const approveWithdrawal = async (req, res) => {
     // Recompute all balances from source of truth
     const balances = await refreshWallet(wallet.id, withdrawal.collection_id);
 
-    await notifyWithdrawalProcessed({
+    await notifyWithdrawalApproved({
         userId: withdrawal.user_id,
         withdrawalId: withdrawal.id,
         amount: withdrawal.amount,

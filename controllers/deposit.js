@@ -1097,7 +1097,7 @@ export const verifyPayment = async (req, res) => {
                         console.error("Organizer email send error:", err?.message || err)
                     );
 
-                    await notifyContributionByReference(reference);
+                    // Successful-payment push is emitted by charge.success only.
                 }
             } catch (e) {
                 console.error("Organizer notification update error:", e?.message || e);
@@ -1729,7 +1729,9 @@ export const sendReceiptNotification = async (req, res) => {
                           </div>`,
                     });
                     console.log("[sendReceiptNotification] ✅ Organizer email sent to", organizer.email);
-                    await notifyContributionByReference(transactionRef);
+                    // Push is intentionally NOT sent from this edge-function callback.
+                    // The verified Paystack charge.success webhook is the sole source of
+                    // truth for organizer payment pushes and handles idempotency there.
                 }
             }
         } catch (err) {

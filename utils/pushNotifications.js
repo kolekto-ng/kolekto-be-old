@@ -67,21 +67,52 @@ function isInvalidSubscriptionError(error) {
     return statusCode === 404 || statusCode === 410;
 }
 
-async function claimNotificationEvent(userId, type, dedupeKey) {
-    if (!dedupeKey) return true;
-
-    const { error } = await supabase
-        .from("push_notification_events")
-        .insert([{ user_id: userId, event_type: type || "general", dedupe_key: dedupeKey }]);
-
-    if (!error) return true;
-
-    if (error.code === "23505") {
-        return false;
+async function claimNotificationEvent(userId, type, dedupeKey, payload) {
+    if (!dedupeKey) return { shouldSend: true, eventId: null };
+    const { data, error } = await supabase.rpc("claim_push_notification_event", {
+        p_user_id: userId,
+        p_event_type: type || "general",
+        p_dedupe_key: dedupeKey,
+        p_payload: payload || {},
+    });
+    if (!error) {
+        const claim = Array.isArray(data) ? data[0] : data;
+        return {
+            shouldSend: Boolean(claim?.should_send),
+            duplicate: Boolean(claim?.is_duplicate),
+            eventId: claim?.event_id || null,
+        };
     }
 
-    console.warn("[push] dedupe insert failed:", error.message || error);
-    return true;
+    console.warn("[push] atomic claim unavailable; using legacy dedupe:", error.message || error);
+    const { data: inserted, error: insertError } = await supabase
+        .from("push_notification_events")
+        .insert([{ user_id: userId, event_type: type || "general", dedupe_key: dedupeKey }])
+        .select("id")
+        .maybeSingle();
+    if (!insertError) return { shouldSend: true, eventId: inserted?.id || null };
+    if (insertError.code === "23505") return { shouldSend: false, duplicate: true, eventId: null };
+
+    console.warn("[push] delivery log write failed; sending without dedupe:", insertError.message || insertError);
+    return { shouldSend: true, eventId: null };
+}
+
+async function recordNotificationResult(eventId, result) {
+    if (!eventId) return;
+    const { error } = await supabase
+        .from("push_notification_events")
+        .update({
+            status: result.status,
+            subscription_count: result.subscriptionCount || 0,
+            sent_count: result.sent || 0,
+            failed_count: result.failed || 0,
+            removed_count: result.removed || 0,
+            last_error: result.error ? String(result.error).slice(0, 1000) : null,
+            sent_at: result.sent > 0 ? new Date().toISOString() : null,
+            updated_at: new Date().toISOString(),
+        })
+        .eq("id", eventId);
+    if (error) console.warn("[push] delivery log update failed:", error.message || error);
 }
 
 export function isPushConfigured() {
@@ -118,6 +149,16 @@ export async function savePushSubscription(userId, subscription, metadata = {}) 
         .single();
 
     if (error) throw error;
+    // Reconcile recent events that happened before this device was available.
+    // Do not hold the subscription API response open while push providers reply.
+    void retryUndeliveredNotifications({
+        userId,
+        statuses: ["failed", "no_subscriptions"],
+        olderThanMs: 0,
+        limit: 10,
+    }).catch((retryError) => {
+        console.warn("[push] subscription retry sweep failed:", retryError?.message || retryError);
+    });
     return data;
 }
 
@@ -135,18 +176,33 @@ export async function removePushSubscription(userId, endpoint) {
 
 export async function sendPushToUser(userId, payload, options = {}) {
     const eventType = options.type || payload.type || "general";
-    const dedupeKey = options.dedupeKey || null;
+    const dedupeKey = options.dedupeKey
+        || (payload.id ? `${eventType}:${payload.id}` : null);
+    const notification = buildPayload(payload);
+    let eventId = null;
 
     try {
-        if (!userId || !configureWebPush()) {
-            console.warn("[push] skipped: missing user or VAPID config", { userId, eventType, dedupeKey });
+        console.log("[push] event detected", { userId, eventType, dedupeKey });
+        if (!userId) {
+            console.warn("[push] target user not found", { eventType, dedupeKey });
             return { sent: 0, skipped: true };
         }
+        console.log("[push] target user found", { userId, eventType, dedupeKey });
 
-        const claimed = await claimNotificationEvent(userId, eventType, dedupeKey);
-        if (!claimed) {
+        const claim = await claimNotificationEvent(userId, eventType, dedupeKey, notification);
+        eventId = claim.eventId;
+        if (!claim.shouldSend) {
             console.log("[push] duplicate suppressed", { userId, eventType, dedupeKey });
             return { sent: 0, duplicate: true };
+        }
+
+        if (!configureWebPush()) {
+            await recordNotificationResult(eventId, {
+                status: "failed",
+                error: "VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY is missing",
+            });
+            console.warn("[push] failed: VAPID is not configured", { userId, eventType, dedupeKey });
+            return { sent: 0, skipped: true };
         }
 
         const { data: subscriptions, error } = await supabase
@@ -156,11 +212,11 @@ export async function sendPushToUser(userId, payload, options = {}) {
 
         if (error) throw error;
         if (!subscriptions?.length) {
-            console.log("[push] no subscriptions for user", { userId, eventType, dedupeKey });
+            await recordNotificationResult(eventId, { status: "no_subscriptions" });
+            console.log("[push] no subscription found", { userId, eventType, dedupeKey });
             return { sent: 0 };
         }
-
-        const notification = buildPayload(payload);
+        console.log("[push] subscriptions found", { userId, eventType, dedupeKey, subscriptions: subscriptions.length });
         let sent = 0;
         let removed = 0;
         let failed = 0;
@@ -187,12 +243,32 @@ export async function sendPushToUser(userId, payload, options = {}) {
                         return;
                     }
                     failed += 1;
-                    console.warn("[push] send failed:", error?.message || error);
+                    console.warn("[push] notification failed", {
+                        userId,
+                        eventType,
+                        subscriptionId: row.id,
+                        statusCode: error?.statusCode || error?.status || null,
+                        error: error?.message || error,
+                    });
                 }
             })
         );
 
-        console.log("[push] send complete", {
+        const status = sent > 0
+            ? "sent"
+            : removed === subscriptions.length
+                ? "no_subscriptions"
+                : "failed";
+        await recordNotificationResult(eventId, {
+            status,
+            subscriptionCount: subscriptions.length,
+            sent,
+            failed,
+            removed,
+            error: failed > 0 ? `${failed} subscription delivery attempt(s) failed` : null,
+        });
+
+        console.log(sent > 0 ? "[push] notification sent successfully" : "[push] notification failed", {
             userId,
             eventType,
             dedupeKey,
@@ -202,8 +278,12 @@ export async function sendPushToUser(userId, payload, options = {}) {
             removed,
         });
 
-        return { sent };
+        return { sent, failed, removed, eventId };
     } catch (error) {
+        await recordNotificationResult(eventId, {
+            status: "failed",
+            error: error?.message || error,
+        }).catch(() => undefined);
         console.warn("[push] notification skipped:", {
             userId,
             eventType,
@@ -212,6 +292,35 @@ export async function sendPushToUser(userId, payload, options = {}) {
         });
         return { sent: 0, error };
     }
+}
+
+export async function retryUndeliveredNotifications({
+    userId = null,
+    statuses = ["failed"],
+    olderThanMs = 60_000,
+    limit = 100,
+} = {}) {
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+    const recent = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    let query = supabase
+        .from("push_notification_events")
+        .select("user_id, event_type, dedupe_key, payload")
+        .in("status", statuses)
+        .lt("last_attempt_at", cutoff)
+        .gte("created_at", recent)
+        .order("last_attempt_at", { ascending: true })
+        .limit(limit);
+    if (userId) query = query.eq("user_id", userId);
+
+    const { data: events, error } = await query;
+    if (error) throw error;
+    await Promise.all((events || []).map((event) =>
+        sendPushToUser(event.user_id, event.payload || {}, {
+            type: event.event_type,
+            dedupeKey: event.dedupe_key,
+        })
+    ));
+    return events?.length || 0;
 }
 
 export async function notifyContributionPaid({ organizerId, collectionId, contributionId, collectionTitle, contributorName, amount, reference }) {
@@ -307,6 +416,21 @@ export async function notifyWithdrawalRequested({ userId, withdrawalId, amount }
     );
 }
 
+export async function notifyWithdrawalApproved({ userId, withdrawalId, amount }) {
+    return sendPushToUser(
+        userId,
+        {
+            title: "Withdrawal approved",
+            body: `Your ${formatNaira(amount)} withdrawal has been approved for processing.`,
+            type: "success",
+            tag: `withdrawal-approved-${withdrawalId}`,
+            id: withdrawalId,
+            url: "/dashboard/wallet",
+        },
+        { type: "withdrawal_approved", dedupeKey: `withdrawal-approved:${withdrawalId}` }
+    );
+}
+
 export async function notifyWithdrawalProcessed({ userId, withdrawalId, amount }) {
     return sendPushToUser(
         userId,
@@ -334,6 +458,21 @@ export async function notifyWithdrawalRejected({ userId, withdrawalId, amount })
             url: "/dashboard/wallet",
         },
         { type: "withdrawal_rejected", dedupeKey: `withdrawal-rejected:${withdrawalId}` }
+    );
+}
+
+export async function notifyWithdrawalFailed({ userId, withdrawalId, amount, status = "failed" }) {
+    return sendPushToUser(
+        userId,
+        {
+            title: "Withdrawal failed",
+            body: `Your ${formatNaira(amount)} withdrawal could not be completed.`,
+            type: "error",
+            tag: `withdrawal-failed-${withdrawalId}`,
+            id: withdrawalId,
+            url: "/dashboard/wallet",
+        },
+        { type: "withdrawal_failed", dedupeKey: `withdrawal-failed:${withdrawalId}:${status}` }
     );
 }
 
@@ -395,7 +534,10 @@ export async function notifyBankAccountAdded({ userId, bankName, repaired }) {
             id: userId,
             url: "/dashboard/profile",
         },
-        { type: repaired ? "bank_account_updated" : "bank_account_added", dedupeKey: null }
+        {
+            type: repaired ? "bank_account_updated" : "bank_account_added",
+            dedupeKey: `bank-account:${userId}:${repaired ? "updated" : "added"}`,
+        }
     );
 }
 
@@ -430,15 +572,80 @@ export async function notifyCollectionStatusChanged({ userId, collectionId, coll
             id: collectionId,
             url: `/dashboard/collections/${collectionId}`,
         },
-        { type: `collection_${normalized}`, dedupeKey: `collection-status:${collectionId}:${normalized}` }
+        {
+            type: normalized === "active" && collectionType === "fundraising"
+                ? "fundraising_approved"
+                : `collection_${normalized}`,
+            dedupeKey: normalized === "active" && collectionType === "fundraising"
+                ? `fundraising-approved:${collectionId}`
+                : `collection-status:${collectionId}:${normalized}`,
+        }
     );
+}
+
+export async function notifyApprovedFundraisers() {
+    const { data: collections, error } = await supabase
+        .from("collections")
+        .select("id, title, user_id, status, collection_type")
+        .eq("collection_type", "fundraising")
+        .eq("status", "active")
+        .limit(500);
+
+    if (error) throw error;
+    await Promise.all((collections || []).map((collection) =>
+        notifyCollectionStatusChanged({
+            userId: collection.user_id,
+            collectionId: collection.id,
+            collectionTitle: collection.title,
+            status: collection.status,
+            collectionType: collection.collection_type,
+        })
+    ));
+}
+
+function getTierCapacityStats(priceTiers = [], contributions = []) {
+    if (!Array.isArray(priceTiers) || priceTiers.length === 0) return null;
+    const soldByTier = new Map();
+    for (const contribution of contributions) {
+        const infoRows = Array.isArray(contribution.contributor_information)
+            ? contribution.contributor_information
+            : [];
+        for (const info of infoRows) {
+            const key = String(info?.TierId || info?.Tier || "");
+            if (key) soldByTier.set(key, (soldByTier.get(key) || 0) + Number(info?.Quantity || 1));
+        }
+    }
+
+    let totalCapacity = 0;
+    let totalSold = 0;
+    let allTiersFinite = true;
+    let allTiersFull = true;
+    for (const tier of priceTiers) {
+        const capacity = Number(tier?.quantity);
+        if (!Number.isFinite(capacity) || capacity <= 0) {
+            allTiersFinite = false;
+            allTiersFull = false;
+            continue;
+        }
+        const key = String(tier?.id || tier?.name || "");
+        const sold = Number(tier?.sold_quantity ?? soldByTier.get(key) ?? 0);
+        totalCapacity += capacity;
+        totalSold += Math.min(capacity, sold);
+        if (sold < capacity) allTiersFull = false;
+    }
+
+    return {
+        totalCapacity,
+        totalSold,
+        full: allTiersFinite && allTiersFull && totalCapacity > 0,
+    };
 }
 
 export async function notifyCollectionMilestones(collectionId, { reference } = {}) {
     try {
         const { data: collection } = await supabase
             .from("collections")
-            .select("id, title, user_id, target_amount, max_contributions, collection_type")
+            .select("id, title, user_id, target_amount, max_contributions, collection_type, price_tiers")
             .eq("id", collectionId)
             .maybeSingle();
 
@@ -446,7 +653,7 @@ export async function notifyCollectionMilestones(collectionId, { reference } = {
 
         const { data: contributions, error } = await supabase
             .from("contributions")
-            .select("amount")
+            .select("amount, contributor_information")
             .eq("collection_id", collectionId)
             .eq("status", "paid");
 
@@ -456,23 +663,25 @@ export async function notifyCollectionMilestones(collectionId, { reference } = {
         const raised = (contributions || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
         const target = Number(collection.target_amount || 0);
         const maxContributions = Number(collection.max_contributions || 0);
+        const tierStats = getTierCapacityStats(collection.price_tiers, contributions || []);
+        const fullByTarget = target > 0 && raised >= target;
+        const fullByLimit = maxContributions > 0 && paidCount >= maxContributions;
+        const fullByTiers = Boolean(tierStats?.full);
 
-        if (target > 0 && raised >= target * 0.8) {
+        if (target > 0 && raised >= target * 0.8 && raised < target) {
             await sendPushToUser(
                 collection.user_id,
                 {
-                    title: raised >= target ? "Collection target reached" : "Collection is 80% funded",
+                    title: "Collection is 80% funded",
                     body: `${compactText(collection.title, "Your collection")} has raised ${formatNaira(raised)}.`,
                     type: "success",
                     tag: `collection-target-${collection.id}`,
                     id: collection.id,
-                    url: `/dashboard/collections/${collection.id}`,
+                    url: `/collections/${collection.id}`,
                 },
                 {
-                    type: raised >= target ? "collection_full" : "collection_80_percent",
-                    dedupeKey: raised >= target
-                        ? `collection-target-full:${collection.id}`
-                        : `collection-target-80:${collection.id}`,
+                    type: "collection_80_percent",
+                    dedupeKey: `collection-target-80:${collection.id}`,
                 }
             );
         }
@@ -495,16 +704,32 @@ export async function notifyCollectionMilestones(collectionId, { reference } = {
             );
         }
 
-        if (maxContributions > 0 && paidCount >= maxContributions) {
+        if (tierStats?.totalCapacity > 0 && tierStats.totalSold >= Math.ceil(tierStats.totalCapacity * 0.8) && !tierStats.full) {
+            await sendPushToUser(
+                collection.user_id,
+                {
+                    title: "Collection is almost full",
+                    body: `${compactText(collection.title, "Your collection")} has sold ${tierStats.totalSold} of ${tierStats.totalCapacity} available spots.`,
+                    type: "info",
+                    tag: `collection-tier-80-${collection.id}`,
+                    id: collection.id,
+                    url: `/collections/${collection.id}`,
+                },
+                { type: "collection_limit_80_percent", dedupeKey: `collection-tier-80:${collection.id}` }
+            );
+        }
+
+        if (fullByTarget || fullByLimit || fullByTiers) {
             await sendPushToUser(
                 collection.user_id,
                 {
                     title: "Collection is full",
-                    body: `${compactText(collection.title, "Your collection")} has reached its contribution limit.`,
+                    body: `${compactText(collection.title, "Your collection")} is now full.`,
                     type: "success",
                     tag: `collection-full-${collection.id}`,
                     id: collection.id,
-                    url: `/dashboard/collections/${collection.id}`,
+                    collectionId: collection.id,
+                    url: `/collections/${collection.id}`,
                 },
                 { type: "collection_full", dedupeKey: `collection-full:${collection.id}` }
             );
@@ -518,7 +743,7 @@ export async function notifyDueCollections() {
     const now = new Date().toISOString();
     const { data: collections, error } = await supabase
         .from("collections")
-        .select("id, title, user_id, deadline, status")
+        .select("id, title, user_id, deadline, status, collection_type, auto_close")
         .not("deadline", "is", null)
         .lte("deadline", now)
         .in("status", ["active", "paused"]);
@@ -529,8 +754,8 @@ export async function notifyDueCollections() {
     }
 
     await Promise.all(
-        (collections || []).map((collection) =>
-            sendPushToUser(
+        (collections || []).map(async (collection) => {
+            await sendPushToUser(
                 collection.user_id,
                 {
                     title: "Collection deadline reached",
@@ -541,8 +766,28 @@ export async function notifyDueCollections() {
                     url: `/dashboard/collections/${collection.id}`,
                 },
                 { type: "collection_deadline", dedupeKey: `collection-deadline:${collection.id}` }
-            )
-        )
+            );
+
+            if (collection.auto_close) {
+                const { data: closed, error: closeError } = await supabase
+                    .from("collections")
+                    .update({ status: "closed", updated_at: new Date().toISOString() })
+                    .eq("id", collection.id)
+                    .in("status", ["active", "paused"])
+                    .select("id")
+                    .maybeSingle();
+                if (closeError) throw closeError;
+                if (closed) {
+                    await notifyCollectionStatusChanged({
+                        userId: collection.user_id,
+                        collectionId: collection.id,
+                        collectionTitle: collection.title,
+                        status: "closed",
+                        collectionType: collection.collection_type,
+                    });
+                }
+            }
+        })
     );
 }
 
