@@ -6,7 +6,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start:dev": "nodemon app.js",
     "start": "node app.js",
-    "audit:payout-accounts": "node scripts/auditPayoutAccounts.js"
+    "audit:payout-accounts": "node scripts/auditPayoutAccounts.js",
+    "encryption:generate-key": "node scripts/generateEncryptionKey.js",
+    "encryption:reencrypt": "node scripts/reencryptPayoutAccounts.js"
   },
   "dependencies": {
     "@google-cloud/recaptcha-enterprise": "^6.3.0",
