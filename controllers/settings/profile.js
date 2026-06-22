@@ -135,48 +135,10 @@ export const verifyBankAccount = async (req, res) => {
 };
 
 // Save account into Supabase
-import crypto from "crypto";
 import stringSimilarity from "string-similarity";
-
-const IV_LENGTH = 16; // AES block size
-
-// Derive a stable 32-byte key from ACCOUNT_ENCRYPTION_KEY.
-// Accepts:
-//   - a 32-byte raw string  → use bytes directly
-//   - a 64-char hex string  → decode to 32 bytes
-//   - any other passphrase  → SHA-256 → 32 bytes
-// Mirrors the helper used in controllers/settings/kyc.js so both modules
-// encrypt with the same key derivation. Module-load errors are avoided by
-// reading the env var lazily on each call (env may not be loaded at import time
-// for some test/CI paths).
-function getEncryptionKeyBuffer() {
-    const raw = process.env.ACCOUNT_ENCRYPTION_KEY;
-    if (!raw) return null;
-    let buf = Buffer.from(raw, "utf8");
-    if (buf.length !== 32 && /^[0-9a-fA-F]{64}$/.test(raw)) {
-        buf = Buffer.from(raw, "hex");
-    }
-    if (buf.length === 32) return buf;
-    return crypto.createHash("sha256").update(raw, "utf8").digest();
-}
-
-// AES-256-CBC encryption.
-// Returns base64 string `iv||ciphertext` so the value can be stored in any
-// column type (bytea, text, jsonb) and round-trips cleanly through PostgREST.
-// The audit script (scripts/auditPayoutAccounts.js) already decodes base64.
-function encryptAccountNumber(text) {
-    const keyBuffer = getEncryptionKeyBuffer();
-    if (!keyBuffer) {
-        throw new Error("ACCOUNT_ENCRYPTION_KEY is not configured");
-    }
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv("aes-256-cbc", keyBuffer, iv);
-    const encrypted = Buffer.concat([
-        cipher.update(String(text), "utf8"),
-        cipher.final(),
-    ]);
-    return Buffer.concat([iv, encrypted]).toString("base64");
-}
+// Encryption is centralised in utils/accountCrypto.js so the encrypt side here
+// can never drift from the decrypt side in controllers/withdrawal.js.
+import { encryptAccountNumber } from "../../utils/accountCrypto.js";
 
 export const saveAccount = async (req, res) => {
     const {
