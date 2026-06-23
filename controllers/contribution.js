@@ -1,5 +1,6 @@
 import { supabase } from "../utils/client.js";
 import { calculateFees } from "../utils/financial.js";
+import { normalizeContributorRows } from "../utils/contributionNormalize.js";
 
 // Get contributions, optionally filtered by collectionId
 export const getContributions = async (req, res) => {
@@ -20,7 +21,10 @@ export const getContributions = async (req, res) => {
         return res.status(500).json({ success: false, message: error.message });
     }
 
-    return res.status(200).json({ success: true, data });
+    // Normalize mixed/older row shapes (legacy column names, contributor info
+    // stored under a different key, etc.) into one consistent response shape.
+    // Read-side only — does not touch stored data or any balance/payment logic.
+    return res.status(200).json({ success: true, data: normalizeContributorRows(data) });
 };
 
 export const getSingleCollection = async (req, res) => {

@@ -7,7 +7,7 @@ const uploadDir = "./uploads/temp/";
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
     console.log(`Created upload directory: ${uploadDir}`);
-}
+}z
 
 // Configure storage
 const storage = multer.diskStorage({
