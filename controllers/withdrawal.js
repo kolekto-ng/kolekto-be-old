@@ -1,5 +1,4 @@
 import axios from "axios";
-import crypto from "crypto";
 import { supabase } from "../utils/client.js";
 import { sendEmail } from "../services/emailService.js";
 import { computeWalletBalances, roundCurrency, normalizeContributions } from "../utils/financial.js";
@@ -8,6 +7,7 @@ import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawal
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
 import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
 import { listAdminEmails } from "../utils/requireAdmin.js";
+import { decryptAccountNumber } from "../utils/accountEncryption.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 
@@ -15,119 +15,6 @@ const paystackHeaders = {
     Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
     "Content-Type": "application/json",
 };
-
-// ─── Payout-account decryption helpers ──────────────────────────────────────
-// Mirrors the logic in scripts/auditPayoutAccounts.js so we accept every
-// historical ciphertext shape: base64 string (current), `\x...` hex, raw
-// Buffer, or the `{type:"Buffer",data:[...]}` JSON form Supabase-JS
-// produced before the encryption fix.
-function getAccountEncryptionKey() {
-    const raw = process.env.ACCOUNT_ENCRYPTION_KEY;
-    if (!raw) return null;
-    let buf = Buffer.from(raw, "utf8");
-    if (buf.length !== 32 && /^[0-9a-fA-F]{64}$/.test(raw)) {
-        buf = Buffer.from(raw, "hex");
-    }
-    if (buf.length === 32) return buf;
-    return crypto.createHash("sha256").update(raw, "utf8").digest();
-}
-
-// Try to unwrap the legacy bug-shape: the original encryptAccountNumber
-// returned a Node Buffer, which Supabase-JS serialised to JSON as
-//   {"type":"Buffer","data":[1,2,...]}
-// If the underlying column was text, that literal JSON string is what got
-// persisted. If the column was bytea, PostgREST hex-encoded those JSON bytes
-// — we need to undo both layers here.
-function tryUnwrapBufferJson(value) {
-    if (typeof value !== "string") return null;
-    const trimmed = value.trim();
-    if (!trimmed.startsWith("{")) return null;
-    try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed && parsed.type === "Buffer" && Array.isArray(parsed.data)) {
-            return Buffer.from(parsed.data);
-        }
-    } catch {
-        /* not JSON — fall through */
-    }
-    return null;
-}
-
-function cipherToBuffer(cipherValue) {
-    if (cipherValue == null) return null;
-    if (Buffer.isBuffer(cipherValue)) return cipherValue;
-    if (cipherValue instanceof Uint8Array) return Buffer.from(cipherValue);
-    if (
-        typeof cipherValue === "object" &&
-        cipherValue.type === "Buffer" &&
-        Array.isArray(cipherValue.data)
-    ) {
-        return Buffer.from(cipherValue.data);
-    }
-    if (typeof cipherValue === "string") {
-        // Legacy text-column corruption: literal JSON-serialised Buffer.
-        const fromJson = tryUnwrapBufferJson(cipherValue);
-        if (fromJson) return fromJson;
-
-        if (cipherValue.startsWith("\\x") || cipherValue.startsWith("0x")) {
-            const hex = cipherValue.startsWith("\\x") ? cipherValue.slice(2) : cipherValue.slice(2);
-            const hexBuf = Buffer.from(hex, "hex");
-            // Legacy bytea-column corruption: hex-encoded JSON-serialised Buffer.
-            // Detect by checking whether the decoded bytes are themselves a
-            // JSON string starting with '{'.
-            if (hexBuf.length > 0 && hexBuf[0] === 0x7b /* '{' */) {
-                const unwrapped = tryUnwrapBufferJson(hexBuf.toString("utf8"));
-                if (unwrapped) return unwrapped;
-            }
-            return hexBuf;
-        }
-        return Buffer.from(cipherValue, "base64");
-    }
-    return null;
-}
-
-function tryDecryptWithBuffer(encryptedBuffer, keyBuffer) {
-    if (!encryptedBuffer || encryptedBuffer.length <= 16) return null;
-    try {
-        const iv = encryptedBuffer.subarray(0, 16);
-        const cipherText = encryptedBuffer.subarray(16);
-        const decipher = crypto.createDecipheriv("aes-256-cbc", keyBuffer, iv);
-        const decrypted = Buffer.concat([decipher.update(cipherText), decipher.final()]);
-        const plain = decrypted.toString("utf8").trim();
-        return plain || null;
-    } catch {
-        return null;
-    }
-}
-
-function decryptAccountNumber(cipherValue) {
-    const keyBuffer = getAccountEncryptionKey();
-    if (!keyBuffer) return null;
-
-    // Primary path: use whatever cipherToBuffer figures out.
-    const primary = cipherToBuffer(cipherValue);
-    const fromPrimary = tryDecryptWithBuffer(primary, keyBuffer);
-    if (fromPrimary) return fromPrimary;
-
-    // Secondary path: if the primary buffer was actually a JSON string in
-    // disguise (e.g. base64-decoded garbage), parse it manually and retry.
-    if (typeof cipherValue === "string") {
-        const trimmed = cipherValue.trim();
-        // Try treating the string as JSON directly.
-        const fromJson = tryUnwrapBufferJson(trimmed);
-        const fromJsonResult = tryDecryptWithBuffer(fromJson, keyBuffer);
-        if (fromJsonResult) return fromJsonResult;
-
-        // Try hex.
-        if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
-            const hexBuf = Buffer.from(trimmed, "hex");
-            const fromHex = tryDecryptWithBuffer(hexBuf, keyBuffer);
-            if (fromHex) return fromHex;
-        }
-    }
-
-    return null;
-}
 
 /**
  * Recompute wallet balances from source of truth and persist them.
@@ -425,6 +312,10 @@ export const requestWithdrawal = async (req, res) => {
             const decrypted = decryptAccountNumber(payoutAccount.account_number_cipher);
             if (decrypted) {
                 accountNumber = decrypted;
+                console.log("[withdrawal] resolved payout account", {
+                    payout_account_id: payoutAccountId,
+                    user_id: userId,
+                });
             } else {
                 // Legacy unrecoverable ciphertext from the original Buffer-
                 // serialisation bug. We log the cipher shape (without the

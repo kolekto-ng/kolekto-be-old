@@ -134,48 +134,11 @@ export const verifyBankAccount = async (req, res) => {
 };
 
 // Save account into Supabase
-import crypto from "crypto";
 import stringSimilarity from "string-similarity";
-
-const IV_LENGTH = 16; // AES block size
-
-// Derive a stable 32-byte key from ACCOUNT_ENCRYPTION_KEY.
-// Accepts:
-//   - a 32-byte raw string  → use bytes directly
-//   - a 64-char hex string  → decode to 32 bytes
-//   - any other passphrase  → SHA-256 → 32 bytes
-// Mirrors the helper used in controllers/settings/kyc.js so both modules
-// encrypt with the same key derivation. Module-load errors are avoided by
-// reading the env var lazily on each call (env may not be loaded at import time
-// for some test/CI paths).
-function getEncryptionKeyBuffer() {
-    const raw = process.env.ACCOUNT_ENCRYPTION_KEY;
-    if (!raw) return null;
-    let buf = Buffer.from(raw, "utf8");
-    if (buf.length !== 32 && /^[0-9a-fA-F]{64}$/.test(raw)) {
-        buf = Buffer.from(raw, "hex");
-    }
-    if (buf.length === 32) return buf;
-    return crypto.createHash("sha256").update(raw, "utf8").digest();
-}
-
-// AES-256-CBC encryption.
-// Returns base64 string `iv||ciphertext` so the value can be stored in any
-// column type (bytea, text, jsonb) and round-trips cleanly through PostgREST.
-// The audit script (scripts/auditPayoutAccounts.js) already decodes base64.
-function encryptAccountNumber(text) {
-    const keyBuffer = getEncryptionKeyBuffer();
-    if (!keyBuffer) {
-        throw new Error("ACCOUNT_ENCRYPTION_KEY is not configured");
-    }
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv("aes-256-cbc", keyBuffer, iv);
-    const encrypted = Buffer.concat([
-        cipher.update(String(text), "utf8"),
-        cipher.final(),
-    ]);
-    return Buffer.concat([iv, encrypted]).toString("base64");
-}
+import {
+    encryptAccountNumber,
+    isAccountCipherDecryptable,
+} from "../../utils/accountEncryption.js";
 
 export const saveAccount = async (req, res) => {
     const {
@@ -294,12 +257,22 @@ export const saveAccount = async (req, res) => {
         // 6️⃣ Check if user already has payout accounts
         const { data: existingAccounts, error: existingErr } = await supabase
             .from("payout_accounts")
-            .select("id")
+            .select("id, is_default, account_number_cipher")
             .eq("user_id", user_id);
 
         if (existingErr) throw existingErr;
 
-        const is_default = existingAccounts.length === 0; // first account becomes default
+        // First account ever becomes default. Otherwise, self-heal: if the
+        // user's current default is a legacy row that can no longer be
+        // decrypted with today's ACCOUNT_ENCRYPTION_KEY, promote this
+        // save (new or repaired account) to default instead of leaving
+        // withdrawals stuck pointing at a dead row. Without this, "save
+        // works, withdrawal still fails" repeats forever — the saved
+        // account is fine, it's just never the one withdrawal picks.
+        const currentDefault = existingAccounts.find((a) => a.is_default);
+        const currentDefaultBroken =
+            !!currentDefault && !isAccountCipherDecryptable(currentDefault.account_number_cipher);
+        const shouldBeDefault = existingAccounts.length === 0 || currentDefaultBroken;
 
         // 7️⃣ Safe repair path: update existing account when the same account is being re-verified.
         // This prevents duplicate rows and refreshes legacy ciphertext/recipient metadata.
@@ -333,6 +306,20 @@ export const saveAccount = async (req, res) => {
             accountToUpdate = matchedAccount || null;
         }
 
+        // Clear any other default for this user before assigning the new
+        // one, excluding the row we're about to touch (so repairing the
+        // account that's already the default doesn't unset itself).
+        if (shouldBeDefault) {
+            let clearQuery = supabase
+                .from("payout_accounts")
+                .update({ is_default: false })
+                .eq("user_id", user_id)
+                .eq("is_default", true);
+            if (accountToUpdate) clearQuery = clearQuery.neq("id", accountToUpdate.id);
+            const { error: clearDefaultErr } = await clearQuery;
+            if (clearDefaultErr) throw clearDefaultErr;
+        }
+
         if (accountToUpdate) {
             const { data: updatedAccount, error: updateError } = await supabase
                 .from("payout_accounts")
@@ -344,6 +331,7 @@ export const saveAccount = async (req, res) => {
                     bank_code,
                     bank_name,
                     account_name,
+                    ...(shouldBeDefault ? { is_default: true } : {}),
                     updated_at: new Date().toISOString()
                 })
                 .eq("id", accountToUpdate.id)
@@ -371,7 +359,7 @@ export const saveAccount = async (req, res) => {
                 bank_code,
                 bank_name,
                 account_name,
-                is_default
+                is_default: shouldBeDefault
             }])
             .select()
             .single();
@@ -412,9 +400,88 @@ export const getAccounts = async (req, res) => {
 
         if (error) throw error;
 
-        res.status(200).json({ data, message: 'sucessfully retrieved payout accounts' });
+        // Never return the cipher or plaintext to the client — only a
+        // boolean the FE can use to avoid auto-selecting a default account
+        // that withdrawal would just reject anyway, and to prompt deletion.
+        const annotated = (data || []).map(({ account_number_cipher, ...rest }) => ({
+            ...rest,
+            is_decryptable: isAccountCipherDecryptable(account_number_cipher),
+        }));
+
+        res.status(200).json({ data: annotated, message: 'sucessfully retrieved payout accounts' });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+};
+
+// Delete a saved payout account. Ownership-checked. If the deleted account
+// was the user's default, promote the most-recently-created remaining
+// decryptable account so withdrawal isn't left without a usable default.
+export const deletePayoutAccount = async (req, res) => {
+    const user_id = req.user?.id;
+    const account_id = req.params?.id || req.body?.account_id;
+
+    if (!user_id) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!account_id) {
+        return res.status(400).json({ error: "account_id is required" });
+    }
+
+    try {
+        const { data: target, error: lookupErr } = await supabase
+            .from("payout_accounts")
+            .select("id, user_id, is_default")
+            .eq("id", account_id)
+            .eq("user_id", user_id)
+            .maybeSingle();
+
+        if (lookupErr) throw lookupErr;
+        if (!target) {
+            return res.status(404).json({
+                error: "Account not found or does not belong to you.",
+                code: "PAYOUT_NOT_FOUND",
+            });
+        }
+
+        const { error: deleteErr } = await supabase
+            .from("payout_accounts")
+            .delete()
+            .eq("id", account_id)
+            .eq("user_id", user_id);
+        if (deleteErr) throw deleteErr;
+
+        if (target.is_default) {
+            const { data: remaining, error: remainingErr } = await supabase
+                .from("payout_accounts")
+                .select("id, account_number_cipher, created_at")
+                .eq("user_id", user_id)
+                .order("created_at", { ascending: false });
+            if (remainingErr) throw remainingErr;
+
+            const nextDefault = (remaining || []).find((a) =>
+                isAccountCipherDecryptable(a.account_number_cipher)
+            );
+            if (nextDefault) {
+                const { error: promoteErr } = await supabase
+                    .from("payout_accounts")
+                    .update({ is_default: true })
+                    .eq("id", nextDefault.id)
+                    .eq("user_id", user_id);
+                if (promoteErr) throw promoteErr;
+            }
+        }
+
+        return res.status(200).json({ success: true });
+    } catch (err) {
+        console.error("deletePayoutAccount error:", {
+            message: err?.message,
+            code: err?.code,
+        });
+        return res.status(500).json({
+            error: err?.message || "Failed to delete account",
+            code: err?.code || "DELETE_ACCOUNT_FAILED",
+        });
     }
 };
 

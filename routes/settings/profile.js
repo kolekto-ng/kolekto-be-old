@@ -14,6 +14,7 @@ import {
     saveAccount,
     getAccounts,
     setDefaultAccount,
+    deletePayoutAccount,
 } from "../../controllers/settings/profile.js";
 
 router.get("/", verifyToken, getProfile);
@@ -22,6 +23,7 @@ router.post("/verify-account", verifyBankAccount);
 router.post("/save-account", verifyToken, saveAccount);
 router.get("/payout-accounts", verifyToken, getAccounts);
 router.post("/set-default", verifyToken, setDefaultAccount);
+router.delete("/payout-accounts/:id", verifyToken, deletePayoutAccount);
 
 
 export default router;
