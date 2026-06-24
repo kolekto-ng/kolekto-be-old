@@ -137,8 +137,14 @@ export const verifyBankAccount = async (req, res) => {
 import stringSimilarity from "string-similarity";
 import {
     encryptAccountNumber,
+    decryptAccountNumber,
     isAccountCipherDecryptable,
 } from "../../utils/accountEncryption.js";
+
+// Postgres unique_violation error code (used to recognise the
+// `recipient_code` unique-constraint hit and turn it into a clean,
+// user-facing message instead of a raw DB error).
+const PG_UNIQUE_VIOLATION = "23505";
 
 export const saveAccount = async (req, res) => {
     const {
@@ -257,7 +263,7 @@ export const saveAccount = async (req, res) => {
         // 6️⃣ Check if user already has payout accounts
         const { data: existingAccounts, error: existingErr } = await supabase
             .from("payout_accounts")
-            .select("id, is_default, account_number_cipher")
+            .select("id, is_default, account_number_cipher, bank_code, account_last4")
             .eq("user_id", user_id);
 
         if (existingErr) throw existingErr;
@@ -290,6 +296,26 @@ export const saveAccount = async (req, res) => {
             accountToUpdate = targetedAccount || null;
         }
 
+        // Exact match: decrypt each of the user's existing accounts for this
+        // bank and compare the real account number. This is far more
+        // reliable than matching on `account_name` (which can drift in
+        // case/whitespace between verify calls) and is what actually
+        // prevents the "same account inserted twice → duplicate
+        // recipient_code" failure — without this, a name-matching miss on
+        // an account that already holds a given `recipient_code` would fall
+        // through to the INSERT path below and collide.
+        if (!accountToUpdate) {
+            const sameBank = existingAccounts.filter((a) => a.bank_code === bank_code);
+            const numberMatch = sameBank.find(
+                (a) => decryptAccountNumber(a.account_number_cipher) === account_number
+            );
+            accountToUpdate = numberMatch ? { id: numberMatch.id, user_id } : null;
+        }
+
+        // Fallback: approximate match by last4 + name, for rows whose cipher
+        // is itself broken/undecryptable (the decrypt-compare above can't
+        // match those — they return null — but they're exactly the rows
+        // most in need of being repaired in place rather than duplicated).
         if (!accountToUpdate) {
             const { data: matchedAccount, error: matchedError } = await supabase
                 .from("payout_accounts")
@@ -364,7 +390,26 @@ export const saveAccount = async (req, res) => {
             .select()
             .single();
 
-        if (error) throw error;
+        if (error) {
+            // The decrypt-compare + name-based matching above should already
+            // catch "this is the same account" before we get here. If it
+            // still collides on recipient_code, the matching missed it (e.g.
+            // a row with a broken cipher AND a non-matching name/last4) —
+            // surface a clean, actionable message instead of the raw
+            // Postgres unique-violation error.
+            if (error.code === PG_UNIQUE_VIOLATION && /recipient_code/i.test(error.message || error.details || "")) {
+                console.error("Save Account: recipient_code collision (likely an existing row the matching logic missed)", {
+                    user_id,
+                    bank_code,
+                    last4,
+                });
+                return res.status(409).json({
+                    error: "This bank account has already been added. You can select it for withdrawal or delete it before adding it again.",
+                    code: "PAYOUT_DUPLICATE_ACCOUNT",
+                });
+            }
+            throw error;
+        }
 
         res.status(201).json({
             ...data,
@@ -472,14 +517,19 @@ export const deletePayoutAccount = async (req, res) => {
             }
         }
 
-        return res.status(200).json({ success: true });
+        return res.status(200).json({
+            success: true,
+            message: "Bank account deleted successfully.",
+        });
     } catch (err) {
+        // Log the real error server-side; the user only ever sees the clean
+        // message — raw Postgres/Supabase errors are not user-facing.
         console.error("deletePayoutAccount error:", {
             message: err?.message,
             code: err?.code,
         });
         return res.status(500).json({
-            error: err?.message || "Failed to delete account",
+            error: "We couldn't delete this bank account. Please try again.",
             code: err?.code || "DELETE_ACCOUNT_FAILED",
         });
     }

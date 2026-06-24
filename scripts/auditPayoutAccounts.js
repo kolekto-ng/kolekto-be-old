@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
-import { isAccountCipherDecryptable } from "../utils/accountEncryption.js";
+import { isAccountCipherDecryptable, describeCipherShape } from "../utils/accountEncryption.js";
 
 dotenv.config();
 
@@ -20,6 +20,18 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 function canDecryptAccountNumber(cipherValue) {
   return isAccountCipherDecryptable(cipherValue);
 }
+
+// CLI flags:
+//   --newest=N        only inspect the N most recently created rows
+//                      (use this right after adding a test account in
+//                      production to see immediately whether it's
+//                      decryptable, without touching legacy rows)
+//   --account-id=UUID  inspect exactly one row in detail
+const args = process.argv.slice(2);
+const newestFlag = args.find((a) => a.startsWith("--newest="));
+const accountIdFlag = args.find((a) => a.startsWith("--account-id="));
+const NEWEST_N = newestFlag ? parseInt(newestFlag.split("=")[1], 10) : null;
+const TARGET_ACCOUNT_ID = accountIdFlag ? accountIdFlag.split("=")[1] : null;
 
 async function fetchAllPayoutAccounts() {
   const pageSize = 500;
@@ -71,26 +83,55 @@ function printExamples(label, rows) {
 }
 
 async function run() {
-  if (!process.env.ACCOUNT_ENCRYPTION_KEY) {
+  const keyRaw = process.env.ACCOUNT_ENCRYPTION_KEY;
+  console.log(
+    `ACCOUNT_ENCRYPTION_KEY: ${keyRaw ? `present (length=${keyRaw.length})` : "MISSING"}`
+  );
+  if (!keyRaw) {
     console.warn(
       "Warning: ACCOUNT_ENCRYPTION_KEY is missing. Decryptability checks will be reported as non-decryptable."
     );
   }
 
-  const rows = await fetchAllPayoutAccounts();
+  let rows = await fetchAllPayoutAccounts();
+
+  if (TARGET_ACCOUNT_ID) {
+    rows = rows.filter((r) => r.id === TARGET_ACCOUNT_ID);
+    if (!rows.length) {
+      console.error(`No payout_accounts row found with id=${TARGET_ACCOUNT_ID}`);
+      return;
+    }
+  } else if (NEWEST_N) {
+    rows = rows.slice(-NEWEST_N); // fetchAllPayoutAccounts orders created_at ascending
+  }
+
   const annotated = rows.map((row) => {
     const hasCipher = !!row.account_number_cipher;
     const decryptable = hasCipher ? canDecryptAccountNumber(row.account_number_cipher) : false;
     const hasRecipient = !!row.recipient_code;
     const highRisk = !hasRecipient && (!hasCipher || !decryptable);
+    // Never includes the cipher bytes or any decrypted value — shape/length only.
+    const shapeInfo = hasCipher ? describeCipherShape(row.account_number_cipher) : null;
     return {
       ...row,
       hasCipher,
       decryptable,
       hasRecipient,
       highRisk,
+      shapeInfo,
     };
   });
+
+  if (TARGET_ACCOUNT_ID || NEWEST_N) {
+    console.log(`\nInspecting ${annotated.length} row(s):`);
+    annotated.forEach((row) => {
+      console.log(
+        `- id=${row.id} user_id=${row.user_id} created_at=${row.created_at} bank=${row.bank_name || "N/A"} last4=${row.account_last4 || "N/A"} decryptable=${row.decryptable} shape=${JSON.stringify(row.shapeInfo)}`
+      );
+    });
+    console.log("\nAudit completed (read-only, no database writes).");
+    return;
+  }
 
   const summary = {
     total: annotated.length,
@@ -104,6 +145,22 @@ async function run() {
   };
 
   printSummary(summary);
+
+  // Breakdown by storage shape (base64 / bytea-hex / BufferJSON / etc.) — this
+  // is the key diagnostic for "is production storing the cipher differently
+  // from testing?" without ever printing the cipher value itself.
+  const shapeCounts = {};
+  annotated.forEach((r) => {
+    const shape = r.shapeInfo?.shape || "no-cipher";
+    shapeCounts[shape] = shapeCounts[shape] || { total: 0, decryptable: 0 };
+    shapeCounts[shape].total += 1;
+    if (r.decryptable) shapeCounts[shape].decryptable += 1;
+  });
+  console.log("\nCipher storage shape breakdown:");
+  Object.entries(shapeCounts).forEach(([shape, counts]) => {
+    console.log(`- ${shape}: ${counts.total} rows (${counts.decryptable} decryptable)`);
+  });
+
   printExamples(
     "High-risk rows",
     annotated.filter((r) => r.highRisk)
