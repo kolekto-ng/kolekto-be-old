@@ -31,12 +31,15 @@ const TARGET_COLLECTION_ID = collectionIdFlag ? collectionIdFlag.split("=")[1] :
  * CONTRIBUTOR_UNIQUE_ID_FIX_REPORT.md in kolekto-fe-old).
  *
  * "Eligible" mirrors the live write-path gate in
- * utils/contributionCodeService.js#shouldGenerateUniqueCode:
- *   - unique_id_enabled = true (the organizer explicitly turned it on), OR
- *   - unique_id_enabled IS NULL (rows created before that column existed)
- *     AND code_prefix is set — the only signal that existed back then.
- * Collections with unique_id_enabled explicitly = false are never touched,
- * even if a stale code_prefix value is still sitting on the row.
+ * utils/contributionCodeService.js#resolveContributionUniqueCode: a
+ * collection is eligible if it has a configured prefix anywhere — its own
+ * `code_prefix`, or a `price_tiers[].prefix` on at least one tier.
+ * `unique_id_enabled` is NOT part of this check — verified against real
+ * production data that a schema migration backfilled that column to
+ * `false` for every pre-existing collection (89 of them in production
+ * have `unique_id_enabled=false` with a real `code_prefix` still set),
+ * so using it as a filter here would silently skip the majority of
+ * collections that actually need backfilling.
  *
  * Safety properties:
  *   - Idempotent: re-running skips rows that already have a code, and never
@@ -55,19 +58,39 @@ const TARGET_COLLECTION_ID = collectionIdFlag ? collectionIdFlag.split("=")[1] :
  *   - Only touches `contributor_unique_code`. No wallet, balance, amount,
  *     or status field is read or written by this script.
  */
-async function fetchEligibleCollections() {
-    let query = supabase
-        .from("collections")
-        .select("id, title, code_prefix, unique_id_enabled, price_tiers")
-        .or("unique_id_enabled.eq.true,and(unique_id_enabled.is.null,code_prefix.not.is.null)");
+function hasAnyConfiguredPrefix(collection) {
+    if (collection.code_prefix) return true;
+    const tiers = Array.isArray(collection.price_tiers) ? collection.price_tiers : [];
+    return tiers.some((t) => Boolean(t?.prefix));
+}
 
-    if (TARGET_COLLECTION_ID) {
-        query = query.eq("id", TARGET_COLLECTION_ID);
+async function fetchEligibleCollections() {
+    const pageSize = 500;
+    const rows = [];
+    let from = 0;
+
+    while (true) {
+        const to = from + pageSize - 1;
+        let query = supabase
+            .from("collections")
+            .select("id, title, code_prefix, unique_id_enabled, price_tiers")
+            .order("created_at", { ascending: true })
+            .range(from, to);
+
+        if (TARGET_COLLECTION_ID) {
+            query = query.eq("id", TARGET_COLLECTION_ID);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+
+        rows.push(...data);
+        if (data.length < pageSize) break;
+        from += pageSize;
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
-    return data || [];
+    return rows.filter(hasAnyConfiguredPrefix);
 }
 
 async function fetchPaidContributions(collectionId) {
@@ -179,7 +202,7 @@ async function run() {
     console.log(`[backfill] starting — mode=${DRY_RUN ? "DRY-RUN (no writes)" : "LIVE"}`);
 
     const collections = await fetchEligibleCollections();
-    console.log(`[backfill] found ${collections.length} eligible collection(s) (unique_id_enabled=true, or legacy null with a code_prefix set)`);
+    console.log(`[backfill] found ${collections.length} eligible collection(s) (have a configured prefix, collection-level or per-tier)`);
 
     let totalMissing = 0;
     let totalFilled = 0;

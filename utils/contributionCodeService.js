@@ -5,20 +5,26 @@ import { supabase } from "./client.js";
  *
  * Every successful-payment path (verifyPayment, handleWebhook, and any
  * future contribution-insert path) must call `resolveContributionUniqueCode`
- * instead of re-implementing the gate inline. Before this helper existed,
- * the gate was duplicated in two places in controllers/deposit.js and only
- * checked `collection.code_prefix`, never `collection.unique_id_enabled` —
- * so a collection with the toggle off but a stale/leftover code_prefix value
- * would still mint codes. This helper makes `unique_id_enabled` the
- * authoritative switch, with `code_prefix` (collection-level or per
- * tier/ticket unit) supplying the actual prefix text.
+ * instead of re-implementing the gate inline.
  *
- * Returns null when no code should be assigned (feature disabled, or no
- * prefix configured to build a code from).
+ * Round 4 correction (verified against real production data): a schema
+ * migration added `unique_id_enabled` with `NOT NULL DEFAULT false`, which
+ * backfilled EVERY pre-existing collection to `false` — including ones
+ * that already had a real `code_prefix` and had been generating codes
+ * successfully for months under the old (prefix-only) logic. In
+ * production this affects 89 collections (vs. only 12 genuinely `true`).
+ * Treating `false` as a hard block — what an earlier pass here did —
+ * silently broke generation for the large majority of working
+ * collections, with zero effect on new ones (the current collection UI
+ * always clears `code_prefix` when the toggle is off, so for anything
+ * saved through it, "a prefix is configured" and "the toggle is on" are
+ * the same fact). So: a configured prefix is what drives generation;
+ * `unique_id_enabled` is read for display only, never as a gate.
+ *
+ * Returns null when no code should be assigned (no prefix configured to
+ * build a code from, collection-level or on the specific unit/tier).
  */
 export async function resolveContributionUniqueCode({ collectionId, collection, unitPrefix }) {
-    if (!shouldGenerateUniqueCode(collection)) return null;
-
     // Strip internal whitespace too — organizers sometimes type a tier
     // prefix like "VIP 1" (label-style) rather than a code-style "VIP1".
     // This never touches the stored prefix value, only the code built
@@ -30,19 +36,11 @@ export async function resolveContributionUniqueCode({ collectionId, collection, 
     return `${prefix}-${nextNumber}`;
 }
 
-/**
- * unique_id_enabled is the authoritative switch — but it didn't always
- * exist as a column. Rows created before it was added have it as
- * null/undefined rather than false, and for those legacy rows the only
- * signal that ever existed was "is code_prefix set". Treating null the
- * same as false would silently stop generation for older collections that
- * have real history to preserve — explicit false must still always mean
- * "never generate", per the organizer's actual choice.
- */
+/** Display-only — whether to show a "unique code" section/label. Not a generation gate (see above). */
 export function shouldGenerateUniqueCode(collection) {
-    if (collection?.unique_id_enabled === true) return true;
-    if (collection?.unique_id_enabled === false) return false;
-    return Boolean(collection?.code_prefix);
+    if (collection?.code_prefix) return true;
+    const tiers = Array.isArray(collection?.price_tiers) ? collection.price_tiers : [];
+    return tiers.some((t) => Boolean(t?.prefix));
 }
 
 /**
