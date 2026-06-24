@@ -11,6 +11,7 @@ import {
     normalizeContributions,
     deriveNetContribution,
 } from "../utils/financial.js";
+import { resolveContributionUniqueCode, shouldGenerateUniqueCode } from "../utils/contributionCodeService.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
@@ -85,82 +86,6 @@ export async function invokeVerifyEdgeFunction(reference) {
         };
     } finally {
         clearTimeout(timeoutId);
-    }
-}
-
-/**
- * B-3: Mint the next contributor unique code atomically.
- *
- * Primary path: call the Postgres RPC `next_contributor_code_number`
- * (see database/b3_contributor_code_sequence.sql). The RPC is a single
- * UPDATE … RETURNING statement, which Postgres serialises automatically —
- * two concurrent calls cannot produce the same number.
- *
- * Fallback path (RPC not yet deployed): use MAX(numeric_suffix)+1 instead
- * of the previous COUNT(*)+1. This is still racy but far less likely to
- * collide because we look at the largest existing suffix instead of the
- * row count, and it lets the code ship before the SQL migration is run.
- * A clear console.warn is logged when the fallback fires so ops can see
- * the migration hasn't been applied.
- *
- * Returns: padded numeric string (e.g. "001", "042", "1234"). The caller
- * prefixes it with collection.code_prefix.
- */
-async function nextContributorCodeNumber(collectionId, codePrefix) {
-    // Primary: atomic RPC
-    try {
-        const { data, error } = await supabase
-            .rpc("next_contributor_code_number", { p_collection_id: collectionId });
-        if (!error && data != null) {
-            const num = typeof data === "number"
-                ? data
-                : Array.isArray(data) && data.length > 0
-                    ? Number(data[0]?.next_contributor_code_number ?? data[0])
-                    : Number(data);
-            if (Number.isFinite(num) && num > 0) {
-                return String(num).padStart(3, "0");
-            }
-        }
-        if (error) {
-            console.warn(
-                "[nextContributorCodeNumber] RPC not available — falling back to MAX+1. " +
-                "Apply database/b3_contributor_code_sequence.sql to remove this fallback.",
-                { code: error.code, message: error.message }
-            );
-        }
-    } catch (rpcErr) {
-        console.warn(
-            "[nextContributorCodeNumber] RPC threw — falling back to MAX+1:",
-            rpcErr?.message
-        );
-    }
-
-    // Fallback: derive the next number from the largest existing suffix that
-    // matches this collection's code_prefix. Still racy under concurrent
-    // writes but better than COUNT(*)+1, and ONLY runs if the RPC is missing.
-    try {
-        const { data: rows } = await supabase
-            .from("contributions")
-            .select("contributor_unique_code")
-            .eq("collection_id", collectionId)
-            .not("contributor_unique_code", "is", null);
-        let maxNum = 0;
-        const prefix = String(codePrefix || "");
-        for (const r of rows || []) {
-            const code = String(r.contributor_unique_code || "");
-            const tail = prefix && code.startsWith(prefix) ? code.slice(prefix.length) : code;
-            const n = parseInt(tail, 10);
-            if (Number.isFinite(n) && n > maxNum) maxNum = n;
-        }
-        return String(maxNum + 1).padStart(3, "0");
-    } catch (fallbackErr) {
-        console.error(
-            "[nextContributorCodeNumber] both RPC and fallback failed:",
-            fallbackErr?.message
-        );
-        // Last resort: timestamp-based so we still produce a unique-looking
-        // code rather than skipping the field entirely.
-        return String(Date.now() % 100000).padStart(5, "0");
     }
 }
 
@@ -740,7 +665,7 @@ export const verifyPayment = async (req, res) => {
                 campaignSummary: collection.campaign_summary || "",
                 bannerUrl: collection.banner_url || collection.banner_image || "",
                 eventDate: collection.event_date || "",
-                uniqueIdEnabled: Boolean(collection.unique_id_enabled),
+                uniqueIdEnabled: shouldGenerateUniqueCode(collection),
                 codePrefix: collection.code_prefix || "",
                 contributionAmount: fallbackNetAmount,
                 platformFee: fbPlatformFee,
@@ -833,7 +758,7 @@ export const verifyPayment = async (req, res) => {
             campaignSummary: collection?.campaign_summary || "",
             bannerUrl: collection?.banner_url || collection?.banner_image || "",
             eventDate: collection?.event_date || "",
-            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
+            uniqueIdEnabled: shouldGenerateUniqueCode(collection),
             codePrefix: collection?.code_prefix || "",
             contributionAmount: existingNetAmount,
             platformFee: exPlatformFee,
@@ -929,7 +854,7 @@ export const verifyPayment = async (req, res) => {
             // ── Step 1: Mark contribution as PAID first (wallet stats depend on this) ──
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix, collection_type, fee_bearer")
+                .select("code_prefix, collection_type, fee_bearer, unique_id_enabled")
                 .eq("id", deposit.collection_id)
                 .single();
 
@@ -939,13 +864,13 @@ export const verifyPayment = async (req, res) => {
                 collection?.fee_bearer || "organizer"
             );
 
-            // B-3: atomic per-collection counter via the Postgres RPC.
-            if (collection?.code_prefix) {
-                const nextNumber = await nextContributorCodeNumber(
-                    deposit.collection_id,
-                    collection.code_prefix
-                );
-                const uniqueCode = `${collection.code_prefix}${nextNumber}`;
+            // unique_id_enabled is the authoritative switch; code_prefix only
+            // supplies the prefix text. See utils/contributionCodeService.js.
+            const uniqueCode = await resolveContributionUniqueCode({
+                collectionId: deposit.collection_id,
+                collection,
+            });
+            if (uniqueCode) {
                 await supabase
                     .from("contributions")
                     .update({
@@ -1119,7 +1044,7 @@ export const verifyPayment = async (req, res) => {
             campaignSummary: collection?.campaign_summary || "",
             bannerUrl: collection?.banner_url || collection?.banner_image || "",
             eventDate: collection?.event_date || "",
-            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
+            uniqueIdEnabled: shouldGenerateUniqueCode(collection),
             codePrefix: collection?.code_prefix || "",
             contributionAmount: verNetAmount,
             platformFee: verPlatformFee,
@@ -1388,7 +1313,7 @@ export const handleWebhook = async (req, res) => {
             // ── Step 1: Mark contribution PAID (wallet depends on this) ──────
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix, collection_type, fee_bearer")
+                .select("code_prefix, collection_type, fee_bearer, unique_id_enabled")
                 .eq("id", deposit.collection_id)
                 .single();
 
@@ -1398,13 +1323,13 @@ export const handleWebhook = async (req, res) => {
                 collection?.fee_bearer || "organizer"
             );
 
-            // B-3: atomic per-collection counter via the Postgres RPC.
-            if (collection?.code_prefix) {
-                const nextNumber = await nextContributorCodeNumber(
-                    deposit.collection_id,
-                    collection.code_prefix
-                );
-                const uniqueCode = `${collection.code_prefix}${nextNumber}`;
+            // unique_id_enabled is the authoritative switch; code_prefix only
+            // supplies the prefix text. See utils/contributionCodeService.js.
+            const uniqueCode = await resolveContributionUniqueCode({
+                collectionId: deposit.collection_id,
+                collection,
+            });
+            if (uniqueCode) {
                 await supabase
                     .from("contributions")
                     .update({
