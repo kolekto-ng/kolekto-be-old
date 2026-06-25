@@ -1729,14 +1729,27 @@ export const sendReceiptNotification = async (req, res) => {
                           </div>`,
                     });
                     console.log("[sendReceiptNotification] ✅ Organizer email sent to", organizer.email);
-                    // Push is intentionally NOT sent from this edge-function callback.
-                    // The verified Paystack charge.success webhook is the sole source of
-                    // truth for organizer payment pushes and handles idempotency there.
                 }
             }
         } catch (err) {
             console.error("[sendReceiptNotification] ❌ Organizer email error:", err?.message);
         }
+    }
+
+    // ── Organizer + contributor PUSH ─────────────────────────────────────────
+    // The edge function (verify-paystack-payment) calls this endpoint on EVERY
+    // first-time confirmed payment, so it — not just the Paystack webhook — is a
+    // reliable trigger for the payment push. Relying only on the webhook means a
+    // misconfigured/blocked webhook URL silently kills ALL payment pushes even
+    // though payments, wallets and emails are fine. This call is fully
+    // idempotent: notifyContributionByReference dedupes on
+    // `contribution-paid:<reference>` (organizer) and `contributor-paid:<reference>`
+    // (contributor), so the webhook also firing never produces a second push.
+    // Best-effort and non-blocking — a push failure must never fail the receipt.
+    if (transactionRef) {
+        await notifyOrganizerPushForReference(transactionRef, "SEND_RECEIPT").catch((err) =>
+            console.error("[sendReceiptNotification] ❌ Organizer push error:", err?.message || err)
+        );
     }
 
     return res.status(200).json({ success: true, results });

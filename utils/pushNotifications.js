@@ -346,6 +346,95 @@ export async function sendPushToUser(userId, payload, options = {}) {
     }
 }
 
+// Diagnostic-only send. Unlike sendPushToUser it does NOT claim/dedupe and does
+// NOT write an in-app notification or a delivery-log row — so it can be run
+// repeatedly to answer one question: "can the backend deliver a push to THIS
+// user's stored subscriptions right now?" Returns per-subscription outcomes
+// (with provider status codes and reasons) and never throws. No secrets are
+// returned. Invalid (404/410) endpoints are cleaned up exactly as the real
+// sender would, so a test run also self-heals dead subscriptions.
+export async function sendTestPushToUser(userId) {
+    const result = {
+        vapidConfigured: isPushConfigured(),
+        subscriptionCount: 0,
+        attempted: 0,
+        sent: 0,
+        failed: 0,
+        removed: 0,
+        failures: [],
+    };
+
+    if (!userId) {
+        result.error = "No authenticated user";
+        return result;
+    }
+
+    if (!configureWebPush()) {
+        result.error = "VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY is missing";
+        return result;
+    }
+
+    const { data: subscriptions, error } = await supabase
+        .from("push_subscriptions")
+        .select("id, endpoint, p256dh, auth_secret")
+        .eq("user_id", userId);
+
+    if (error) {
+        result.error = error.message || String(error);
+        return result;
+    }
+
+    result.subscriptionCount = subscriptions?.length || 0;
+    if (!subscriptions?.length) return result;
+
+    const notification = buildPayload({
+        title: "Kolekto test notification",
+        body: "If you can read this, push delivery is working on this device.",
+        type: "info",
+        tag: `push-test-${Date.now()}`,
+        renotify: true,
+        url: "/dashboard",
+    });
+
+    await Promise.all(
+        subscriptions.map(async (row) => {
+            result.attempted += 1;
+            try {
+                await webpush.sendNotification(
+                    {
+                        endpoint: row.endpoint,
+                        keys: { p256dh: row.p256dh, auth: row.auth_secret },
+                    },
+                    JSON.stringify(notification)
+                );
+                result.sent += 1;
+            } catch (sendError) {
+                const statusCode = sendError?.statusCode || sendError?.status || null;
+                if (isInvalidSubscriptionError(sendError)) {
+                    await supabase.from("push_subscriptions").delete().eq("id", row.id);
+                    result.removed += 1;
+                    result.failures.push({
+                        subscriptionId: row.id,
+                        statusCode,
+                        reason: "expired-subscription-removed",
+                    });
+                    return;
+                }
+                result.failed += 1;
+                result.failures.push({
+                    subscriptionId: row.id,
+                    statusCode,
+                    // web-push surfaces the provider's own message here; it never
+                    // contains our VAPID private key.
+                    reason: sendError?.body || sendError?.message || "unknown-error",
+                });
+            }
+        })
+    );
+
+    return result;
+}
+
 export async function retryUndeliveredNotifications({
     userId = null,
     statuses = ["failed"],
@@ -393,13 +482,47 @@ export async function notifyContributionPaid({ organizerId, collectionId, contri
     );
 }
 
+// Contributor-side "Payment successful" push. ONLY fires when the payer's
+// email uniquely matches a real account (profiles row → auth user). Anonymous
+// payers get an email receipt, never a faked push. Idempotent per reference.
+async function notifyContributorPaidByEmail({ email, collectionId, collectionTitle, contributionId, amount, reference }) {
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!normalizedEmail) return { sent: 0, skipped: true };
+
+    const { data: profiles, error } = await supabase
+        .from("profiles")
+        .select("id")
+        .ilike("email", normalizedEmail)
+        .limit(2);
+
+    // Require exactly one match — never push to an ambiguous/aliased account.
+    if (error || !profiles || profiles.length !== 1) return { sent: 0, skipped: true };
+    const contributorUserId = profiles[0].id;
+
+    return sendPushToUser(
+        contributorUserId,
+        {
+            title: "Payment successful",
+            body: `Your payment of ${formatNaira(amount)} for ${compactText(collectionTitle, "a collection")} was received.`,
+            type: "payment_successful",
+            tag: `contributor-paid-${reference || collectionId}`,
+            id: contributionId || reference || collectionId,
+            collectionId,
+            contributionId: contributionId || null,
+            transactionReference: reference || null,
+            url: "/dashboard/activities",
+        },
+        { type: "payment_successful", dedupeKey: reference ? `contributor-paid:${reference}` : null }
+    );
+}
+
 export async function notifyContributionByReference(reference) {
     try {
         if (!reference) return;
 
         const { data: contributions } = await supabase
             .from("contributions")
-            .select("id, name, amount, gross_amount, collection_id, payment_reference")
+            .select("id, name, email, amount, gross_amount, collection_id, payment_reference")
             .eq("payment_reference", reference)
             .order("created_at", { ascending: true });
 
@@ -428,6 +551,19 @@ export async function notifyContributionByReference(reference) {
             contributorName: contribution.name,
             amount: totalAmount || contribution.gross_amount || contribution.amount,
             reference,
+        });
+
+        // Contributor push — best-effort, only if their email links to a real
+        // account. Never blocks the organizer notification above.
+        await notifyContributorPaidByEmail({
+            email: contribution.email,
+            collectionId: collection.id,
+            collectionTitle: collection.title,
+            contributionId: contribution.id,
+            amount: totalAmount || contribution.gross_amount || contribution.amount,
+            reference,
+        }).catch((error) => {
+            console.warn("[push] contributor notification skipped:", error?.message || error);
         });
 
         await notifyCollectionMilestones(collection.id, { reference });
