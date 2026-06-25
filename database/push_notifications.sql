@@ -81,8 +81,26 @@ grant select, insert, update, delete on table public.push_subscriptions to servi
 grant select, insert, update on table public.push_notification_events to service_role;
 
 -- Atomically claims a notification event. Concurrent webhook/callback/job
--- paths cannot both send it. Failed/no-subscription events can be retried and
--- a crashed worker's processing lease expires after five minutes.
+-- paths cannot both send it.
+--
+-- A claim is granted in exactly two cases:
+--   1. First time we ever see this (user, event_type, dedupe_key) — the INSERT
+--      wins, so the very first delivery attempt always happens.
+--   2. A genuine TRANSIENT failure ('failed') OR a crashed-worker lease
+--      ('processing' older than 5 min) — but ONLY while the event is still
+--      inside its retry window (created within RETRY_WINDOW and fewer than
+--      MAX_ATTEMPTS tries).
+--
+-- Deliberately NOT re-claimable:
+--   • status 'sent'            — already delivered, permanently done.
+--   • status 'no_subscriptions'— there was no device to deliver to. This is
+--     TERMINAL. Resurrecting it later (when the user finally enables push, or
+--     when a cron re-enumerates the collection) is exactly what caused the
+--     "old fundraising approval / expired deadline notifications reappear"
+--     bug. The durable in-app notification row was already written, so the
+--     user still sees it in the bell — they just don't get a stale push.
+--   • anything older than RETRY_WINDOW or past MAX_ATTEMPTS — never resurrected,
+--     so a backend restart or an unbounded sweep can never replay old events.
 create or replace function public.claim_push_notification_event(
     p_user_id uuid,
     p_event_type text,
@@ -96,6 +114,8 @@ set search_path = ''
 as $$
 declare
     claimed_id uuid;
+    retry_window constant interval := interval '24 hours';
+    max_attempts constant integer := 5;
 begin
     insert into public.push_notification_events (
         user_id, event_type, dedupe_key, payload, status,
@@ -122,8 +142,11 @@ begin
      where user_id = p_user_id
        and event_type = p_event_type
        and dedupe_key = p_dedupe_key
+       -- Never resurrect an event past its retry window or attempt budget.
+       and created_at > now() - retry_window
+       and attempt_count < max_attempts
        and (
-           status in ('failed', 'no_subscriptions')
+           status = 'failed'
            or (status = 'processing' and last_attempt_at < now() - interval '5 minutes')
        )
     returning id into claimed_id;

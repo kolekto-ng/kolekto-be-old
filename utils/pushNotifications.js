@@ -196,12 +196,17 @@ export async function savePushSubscription(userId, subscription, metadata = {}) 
         .single();
 
     if (error) throw error;
-    // Reconcile recent events that happened before this device was available.
-    // Do not hold the subscription API response open while push providers reply.
+    // Retry ONLY genuinely-failed deliveries (transient push-provider errors)
+    // from the last 15 minutes — i.e. an event that failed against a device the
+    // user already had moments ago. We deliberately do NOT replay
+    // 'no_subscriptions' events here: those happened when the user had no device
+    // and are terminal. Resurrecting them on enable is what produced the flood
+    // of long-ago approvals/deadlines. The in-app rows already exist either way.
     void retryUndeliveredNotifications({
         userId,
-        statuses: ["failed", "no_subscriptions"],
+        statuses: ["failed"],
         olderThanMs: 0,
+        maxAgeMs: 15 * 60 * 1000,
         limit: 10,
     }).catch((retryError) => {
         console.warn("[push] subscription retry sweep failed:", retryError?.message || retryError);
@@ -435,18 +440,29 @@ export async function sendTestPushToUser(userId) {
     return result;
 }
 
+// Retries ONLY transient 'failed' deliveries. 'no_subscriptions' is terminal
+// and is never swept here (resurrecting it = the stale-notification flood).
+// `maxAgeMs` bounds how old (by created_at) an event may be to still qualify;
+// it must stay within the claim function's 24h retry window — anything older is
+// permanently abandoned by the claim guard anyway, so we never even select it.
 export async function retryUndeliveredNotifications({
     userId = null,
     statuses = ["failed"],
     olderThanMs = 60_000,
+    maxAgeMs = 24 * 60 * 60 * 1000,
     limit = 100,
 } = {}) {
+    // Defensive: 'no_subscriptions' (and any non-'failed' status) is terminal —
+    // the claim function will refuse it, so never select it for a retry.
+    const retryStatuses = statuses.filter((status) => status === "failed");
+    if (retryStatuses.length === 0) return 0;
+
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-    const recent = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const recent = new Date(Date.now() - maxAgeMs).toISOString();
     let query = supabase
         .from("push_notification_events")
         .select("user_id, event_type, dedupe_key, payload")
-        .in("status", statuses)
+        .in("status", retryStatuses)
         .lt("last_attempt_at", cutoff)
         .gte("created_at", recent)
         .order("last_attempt_at", { ascending: true })
@@ -729,7 +745,7 @@ export async function notifyBankAccountAdded({ userId, bankName, repaired }) {
     );
 }
 
-export async function notifyCollectionStatusChanged({ userId, collectionId, collectionTitle, status, collectionType }) {
+export async function notifyCollectionStatusChanged({ userId, collectionId, collectionTitle, status, collectionType, transitionAt }) {
     const normalized = String(status || "").toLowerCase();
     const titleByStatus = {
         active: collectionType === "fundraising" ? "Fundraising approved" : "Collection resumed",
@@ -750,6 +766,20 @@ export async function notifyCollectionStatusChanged({ userId, collectionId, coll
     const notificationTitle = titleByStatus[normalized];
     if (!notificationTitle) return;
 
+    const isFundraisingApproval = normalized === "active" && collectionType === "fundraising";
+
+    // Fundraising approval is a once-ever event → key on the collection id alone.
+    // All other status changes are REPEATABLE (pause → reopen → pause again), so
+    // the key must include the specific transition instant; otherwise the second
+    // "paused" would collide with the first and be silently deduped. `transitionAt`
+    // is the collection's updated_at at the moment of this transition — a webhook
+    // retry or double-processing of the SAME transition shares it (deduped),
+    // while a genuinely new transition gets a fresh key (notified once).
+    const transitionStamp = transitionAt ? new Date(transitionAt).getTime() : "";
+    const dedupeKey = isFundraisingApproval
+        ? `fundraising-approved:${collectionId}`
+        : `collection-status:${collectionId}:${normalized}:${transitionStamp}`;
+
     return sendPushToUser(
         userId,
         {
@@ -761,12 +791,8 @@ export async function notifyCollectionStatusChanged({ userId, collectionId, coll
             url: `/dashboard/collections/${collectionId}`,
         },
         {
-            type: normalized === "active" && collectionType === "fundraising"
-                ? "fundraising_approved"
-                : `collection_${normalized}`,
-            dedupeKey: normalized === "active" && collectionType === "fundraising"
-                ? `fundraising-approved:${collectionId}`
-                : `collection-status:${collectionId}:${normalized}`,
+            type: isFundraisingApproval ? "fundraising_approved" : `collection_${normalized}`,
+            dedupeKey,
         }
     );
 }
@@ -774,20 +800,24 @@ export async function notifyCollectionStatusChanged({ userId, collectionId, coll
 // Admin fundraising approval happens by setting collections.status = 'active'
 // directly (no backend endpoint owns that transition), so this sweep is the
 // trigger for the approval push. It is idempotent — the dedupe key
-// `fundraising-approved:<id>` guarantees a single notification — so it is safe
-// to run frequently. `sinceMs` bounds a fast sweep to recently-activated
-// fundraisers; the unfiltered hourly run is the catch-all backstop.
-export async function notifyApprovedFundraisers({ sinceMs = null } = {}) {
-    let query = supabase
+// `fundraising-approved:<id>` guarantees a single notification.
+//
+// CRITICAL: this sweep is ALWAYS windowed by `updated_at`. The old "unfiltered
+// hourly backstop" re-enumerated EVERY active fundraiser on every run; combined
+// with the previous claim logic that resurrected non-'sent' events, that
+// re-sent ancient approvals indefinitely. We now only ever look at fundraisers
+// activated within `sinceMs` (default 26h, slight overlap on the hourly run),
+// and the claim function's 24h window is the hard backstop that prevents any
+// stale resend even if an old row's `updated_at` is bumped by an edit.
+export async function notifyApprovedFundraisers({ sinceMs = 26 * 60 * 60 * 1000 } = {}) {
+    const windowMs = sinceMs || 26 * 60 * 60 * 1000;
+    const query = supabase
         .from("collections")
         .select("id, title, user_id, status, collection_type, updated_at")
         .eq("collection_type", "fundraising")
         .eq("status", "active")
+        .gte("updated_at", new Date(Date.now() - windowMs).toISOString())
         .limit(500);
-
-    if (sinceMs) {
-        query = query.gte("updated_at", new Date(Date.now() - sinceMs).toISOString());
-    }
 
     const { data: collections, error } = await query;
 
@@ -941,11 +971,18 @@ export async function notifyCollectionMilestones(collectionId, { reference } = {
 
 export async function notifyDueCollections() {
     const now = new Date().toISOString();
+    // Only deadlines that passed within the last 48h. Without this lower bound,
+    // every run re-enumerated EVERY collection whose deadline ever passed and
+    // that stayed active/paused (e.g. auto_close off) — re-sending ancient
+    // "deadline reached" pushes forever. The claim function's 24h window is the
+    // hard backstop; this just keeps the sweep cheap and focused on fresh ones.
+    const since = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     const { data: collections, error } = await supabase
         .from("collections")
         .select("id, title, user_id, deadline, status, collection_type, auto_close")
         .not("deadline", "is", null)
         .lte("deadline", now)
+        .gte("deadline", since)
         .in("status", ["active", "paused"]);
 
     if (error) {
@@ -969,9 +1006,10 @@ export async function notifyDueCollections() {
             );
 
             if (collection.auto_close) {
+                const closedAt = new Date().toISOString();
                 const { data: closed, error: closeError } = await supabase
                     .from("collections")
-                    .update({ status: "closed", updated_at: new Date().toISOString() })
+                    .update({ status: "closed", updated_at: closedAt })
                     .eq("id", collection.id)
                     .in("status", ["active", "paused"])
                     .select("id")
@@ -984,6 +1022,7 @@ export async function notifyDueCollections() {
                         collectionTitle: collection.title,
                         status: "closed",
                         collectionType: collection.collection_type,
+                        transitionAt: closedAt,
                     });
                 }
             }

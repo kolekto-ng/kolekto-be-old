@@ -27,6 +27,9 @@ cron.schedule(
 cron.schedule(
     "17 * * * *",
     () => {
+        // Both sweeps are time-windowed internally (deadlines/approvals from the
+        // last ~1-2 days only) and the claim function refuses anything past its
+        // 24h retry window, so this hourly run can never replay stale events.
         notifyDueCollections().catch((error) => {
             console.warn("[push-job] collection deadline check failed:", error?.message || error);
         });
