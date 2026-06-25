@@ -1,4 +1,5 @@
 ﻿import webpush from "web-push";
+import { randomUUID } from "node:crypto";
 import { supabase } from "./client.js";
 
 const DEFAULT_FRONTEND_URL = "https://www.kolekto.com.ng";
@@ -95,6 +96,52 @@ async function claimNotificationEvent(userId, type, dedupeKey, payload) {
 
     console.warn("[push] delivery log write failed; sending without dedupe:", insertError.message || insertError);
     return { shouldSend: true, eventId: null };
+}
+
+function resolveNotificationEntity(eventType, notification) {
+    if (notification.collectionId) return { entityType: "collection", entityId: String(notification.collectionId) };
+    if (notification.contributionId) return { entityType: "contribution", entityId: String(notification.contributionId) };
+    const type = String(eventType || "");
+    if (type.startsWith("withdrawal")) return { entityType: "withdrawal", entityId: notification.id ? String(notification.id) : null };
+    if (type.startsWith("kyc")) return { entityType: "kyc", entityId: notification.id ? String(notification.id) : null };
+    if (type.startsWith("collection") || type.startsWith("fundraising")) {
+        return { entityType: "collection", entityId: notification.id ? String(notification.id) : null };
+    }
+    return { entityType: null, entityId: notification.id ? String(notification.id) : null };
+}
+
+// Durable in-app notification record. Mirrors every push so users have an
+// in-app feed even when the browser push was undeliverable. Idempotent on
+// (user_id, type, dedupe_key): the natural key falls back to the push tag,
+// then a random UUID, so webhook/retry/double-click replays never duplicate
+// a row. Best-effort — a missing table or write error never blocks the push.
+async function recordInAppNotification(userId, eventType, dedupeKey, notification) {
+    if (!userId) return;
+    try {
+        const naturalKey = dedupeKey || notification.tag || randomUUID();
+        const { entityType, entityId } = resolveNotificationEntity(eventType, notification);
+        const { error } = await supabase
+            .from("notifications")
+            .upsert(
+                {
+                    user_id: userId,
+                    type: eventType || "general",
+                    title: notification.title || "Kolekto update",
+                    body: notification.body || "",
+                    url: notification.url || null,
+                    entity_type: entityType,
+                    entity_id: entityId,
+                    data: notification,
+                    dedupe_key: naturalKey,
+                },
+                { onConflict: "user_id,type,dedupe_key", ignoreDuplicates: true }
+            );
+        if (error) {
+            console.warn("[push] in-app notification write skipped:", error.message || error);
+        }
+    } catch (error) {
+        console.warn("[push] in-app notification write threw:", error?.message || error);
+    }
 }
 
 async function recordNotificationResult(eventId, result) {
@@ -195,6 +242,11 @@ export async function sendPushToUser(userId, payload, options = {}) {
             console.log("[push] duplicate suppressed", { userId, eventType, dedupeKey });
             return { sent: 0, duplicate: true };
         }
+
+        // Persist the in-app notification first, so the user has a durable
+        // record regardless of whether the browser push below succeeds (no
+        // VAPID config, no subscription, expired endpoint, etc.). Idempotent.
+        await recordInAppNotification(userId, eventType, dedupeKey, notification);
 
         if (!configureWebPush()) {
             await recordNotificationResult(eventId, {
@@ -583,13 +635,25 @@ export async function notifyCollectionStatusChanged({ userId, collectionId, coll
     );
 }
 
-export async function notifyApprovedFundraisers() {
-    const { data: collections, error } = await supabase
+// Admin fundraising approval happens by setting collections.status = 'active'
+// directly (no backend endpoint owns that transition), so this sweep is the
+// trigger for the approval push. It is idempotent — the dedupe key
+// `fundraising-approved:<id>` guarantees a single notification — so it is safe
+// to run frequently. `sinceMs` bounds a fast sweep to recently-activated
+// fundraisers; the unfiltered hourly run is the catch-all backstop.
+export async function notifyApprovedFundraisers({ sinceMs = null } = {}) {
+    let query = supabase
         .from("collections")
-        .select("id, title, user_id, status, collection_type")
+        .select("id, title, user_id, status, collection_type, updated_at")
         .eq("collection_type", "fundraising")
         .eq("status", "active")
         .limit(500);
+
+    if (sinceMs) {
+        query = query.gte("updated_at", new Date(Date.now() - sinceMs).toISOString());
+    }
+
+    const { data: collections, error } = await query;
 
     if (error) throw error;
     await Promise.all((collections || []).map((collection) =>

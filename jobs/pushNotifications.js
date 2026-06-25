@@ -12,6 +12,14 @@ cron.schedule(
         retryUndeliveredNotifications().catch((error) => {
             console.warn("[push-job] failed-delivery retry failed:", error?.message || error);
         });
+        // Fast fundraising-approval sweep: admin approval flips status to
+        // 'active' directly in the DB, so catch recently-activated fundraisers
+        // within ~5 min instead of waiting for the hourly backstop below.
+        // Idempotent (dedupe key fundraising-approved:<id>), windowed to the
+        // last 2 hours to bound the work per run.
+        notifyApprovedFundraisers({ sinceMs: 2 * 60 * 60 * 1000 }).catch((error) => {
+            console.warn("[push-job] fast fundraising approval sweep failed:", error?.message || error);
+        });
     },
     { timezone: "Africa/Lagos" }
 );
