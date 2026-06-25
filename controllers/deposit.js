@@ -1262,6 +1262,20 @@ export const handleWebhook = async (req, res) => {
         // identical to the FE path. This is the actual safety net that was
         // missing before F1.
         if (depositError || !deposit) {
+            // D-1 diagnostic: the webhook payload carries its OWN copy of
+            // metadata, separate from what the edge function fetches via
+            // /transaction/verify. Logging its shape here (never the values
+            // beyond type/keys) lets a future investigation compare whether
+            // Paystack's webhook and verify-API ever disagree on metadata
+            // shape for the same reference — useful if "Missing collection
+            // ID" recurs after the D-1 fix in verify-paystack-payment.
+            console.log(`[webhook ref=${reference}] WEBHOOK_METADATA_DIAGNOSTIC`, {
+                rawMetadataType: typeof event.data?.metadata,
+                metadataKeys:
+                    event.data?.metadata && typeof event.data.metadata === "object"
+                        ? Object.keys(event.data.metadata)
+                        : null,
+            });
             console.log(
                 `[webhook ref=${reference}] WEBHOOK_INVOKED_VERIFY — no contributions or deposits row exists; recovering via edge function`
             );
