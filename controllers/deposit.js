@@ -32,8 +32,15 @@ const PAYSTACK_BASE_URL = "https://api.paystack.co";
  * Returns { ok: boolean, status: number, body: any }.
  *
  * Exported so the F5 admin reconcile endpoint can reuse the same code path.
+ *
+ * @param {string} reference
+ * @param {string|null} [overrideCollectionId] - Manual recovery hint, only
+ *   used by the edge function when automatic metadata resolution (the
+ *   pending_payment_context row + Paystack's own metadata) both fail to
+ *   produce a collectionId. Supplied by an admin via Admin Reconcile after
+ *   confirming, out-of-band, which collection a stranded payment belongs to.
  */
-export async function invokeVerifyEdgeFunction(reference) {
+export async function invokeVerifyEdgeFunction(reference, overrideCollectionId = null) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey =
         process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -60,7 +67,7 @@ export async function invokeVerifyEdgeFunction(reference) {
     try {
         const res = await axios.post(
             url,
-            { reference },
+            overrideCollectionId ? { reference, overrideCollectionId } : { reference },
             {
                 headers: {
                     Authorization: `Bearer ${supabaseKey}`,
