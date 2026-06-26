@@ -147,7 +147,18 @@ const verifyAccountEncryptionConfig = () => {
 
 app.listen(port, '0.0.0.0', async () => {
     console.log(`Server Running on port ${port}`);
+<<<<<<< HEAD
     verifyAccountEncryptionConfig();
+=======
+    // TEMPORARY DEBUG (remove once the payout-account decryption issue is
+    // confirmed fixed in production): confirms the process actually picked
+    // up ACCOUNT_ENCRYPTION_KEY after a `pm2 restart` (PM2 does NOT reload
+    // .env on a plain restart — `--update-env` is required, or the env was
+    // baked into the PM2 process at an earlier, different value). Logs
+    // presence + length only — never the key value itself.
+    const keyRaw = process.env.ACCOUNT_ENCRYPTION_KEY;
+    console.log("[startup] ACCOUNT_ENCRYPTION_KEY:", keyRaw ? `present (length=${keyRaw.length})` : "MISSING");
+>>>>>>> staging
     // Initialize email service on startup, but don't block the API in dev
     if (process.env.NODE_ENV === "production") {
         await initializeEmailService();

@@ -56,6 +56,7 @@ export const createCollection = async (req, res) => {
         currency,
         currency_symbol,
         code_prefix,
+        unique_id_enabled,
         support,
         price_tiers, // <-- array of tiers if tiered
     } = req.body;
@@ -219,6 +220,7 @@ export const createCollection = async (req, res) => {
                     type: collectionType, // "normal" or "tiered"
                     deadline,
                     code_prefix: code_prefix || null,
+                    unique_id_enabled: Boolean(unique_id_enabled),
                     max_contributions,
                     contributions_fields: contributions_fields || [],
                     // Fundraising campaigns require admin approval before contributors

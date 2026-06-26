@@ -7,8 +7,12 @@
     "start:dev": "nodemon app.js",
     "start": "node app.js",
     "audit:payout-accounts": "node scripts/auditPayoutAccounts.js",
+<<<<<<< HEAD
     "encryption:generate-key": "node scripts/generateEncryptionKey.js",
     "encryption:reencrypt": "node scripts/reencryptPayoutAccounts.js"
+=======
+    "backfill:unique-codes": "node scripts/backfillUniqueContributionCodes.js"
+>>>>>>> staging
   },
   "dependencies": {
     "@google-cloud/recaptcha-enterprise": "^6.3.0",

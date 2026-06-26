@@ -10,6 +10,7 @@ import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawal
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
 import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
 import { listAdminEmails } from "../utils/requireAdmin.js";
+<<<<<<< HEAD
 import {
     notifyWithdrawalApproved,
     notifyWithdrawalFailed,
@@ -17,6 +18,9 @@ import {
     notifyWithdrawalRejected,
     notifyWithdrawalRequested,
 } from "../utils/pushNotifications.js";
+=======
+import { decryptAccountNumber } from "../utils/accountEncryption.js";
+>>>>>>> staging
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 
@@ -25,11 +29,14 @@ const paystackHeaders = {
     "Content-Type": "application/json",
 };
 
+<<<<<<< HEAD
 // Payout-account decryption (key derivation + every historical ciphertext
 // shape) lives in utils/accountCrypto.js. `decryptAccountNumber` is imported
 // at the top of this file and never throws — it returns null when a value
 // cannot be recovered with any candidate key.
 
+=======
+>>>>>>> staging
 /**
  * Recompute wallet balances from source of truth and persist them.
  */
@@ -326,6 +333,10 @@ export const requestWithdrawal = async (req, res) => {
             const decrypted = decryptAccountNumber(payoutAccount.account_number_cipher);
             if (decrypted) {
                 accountNumber = decrypted;
+                console.log("[withdrawal] resolved payout account", {
+                    payout_account_id: payoutAccountId,
+                    user_id: userId,
+                });
             } else {
                 // Legacy unrecoverable ciphertext from the original Buffer-
                 // serialisation bug. We log the cipher shape (without the
