@@ -136,22 +136,18 @@ export const verifyBankAccount = async (req, res) => {
 
 // Save account into Supabase
 import stringSimilarity from "string-similarity";
-<<<<<<< HEAD
 // Encryption is centralised in utils/accountCrypto.js so the encrypt side here
 // can never drift from the decrypt side in controllers/withdrawal.js.
-import { encryptAccountNumber } from "../../utils/accountCrypto.js";
-=======
 import {
     encryptAccountNumber,
     decryptAccountNumber,
     isAccountCipherDecryptable,
-} from "../../utils/accountEncryption.js";
+} from "../../utils/accountCrypto.js";
 
 // Postgres unique_violation error code (used to recognise the
 // `recipient_code` unique-constraint hit and turn it into a clean,
 // user-facing message instead of a raw DB error).
 const PG_UNIQUE_VIOLATION = "23505";
->>>>>>> staging
 
 export const saveAccount = async (req, res) => {
     const {

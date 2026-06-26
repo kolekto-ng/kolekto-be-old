@@ -1,15 +1,12 @@
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
-<<<<<<< HEAD
 // Use the SAME decryption used by the live withdrawal path so the audit's
 // "decryptable" verdict matches what the app will actually be able to read.
 import {
   decryptAccountNumber,
   isAccountEncryptionConfigured,
+  describeCipherShape,
 } from "../utils/accountCrypto.js";
-=======
-import { isAccountCipherDecryptable, describeCipherShape } from "../utils/accountEncryption.js";
->>>>>>> staging
 
 dotenv.config();
 
@@ -27,11 +24,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 function canDecryptAccountNumber(cipherValue) {
-<<<<<<< HEAD
   return !!decryptAccountNumber(cipherValue);
-}
-=======
-  return isAccountCipherDecryptable(cipherValue);
 }
 
 // CLI flags:
@@ -45,7 +38,6 @@ const newestFlag = args.find((a) => a.startsWith("--newest="));
 const accountIdFlag = args.find((a) => a.startsWith("--account-id="));
 const NEWEST_N = newestFlag ? parseInt(newestFlag.split("=")[1], 10) : null;
 const TARGET_ACCOUNT_ID = accountIdFlag ? accountIdFlag.split("=")[1] : null;
->>>>>>> staging
 
 async function fetchAllPayoutAccounts() {
   const pageSize = 500;
@@ -97,15 +89,11 @@ function printExamples(label, rows) {
 }
 
 async function run() {
-<<<<<<< HEAD
-  if (!isAccountEncryptionConfigured()) {
-=======
   const keyRaw = process.env.ACCOUNT_ENCRYPTION_KEY;
   console.log(
     `ACCOUNT_ENCRYPTION_KEY: ${keyRaw ? `present (length=${keyRaw.length})` : "MISSING"}`
   );
-  if (!keyRaw) {
->>>>>>> staging
+  if (!isAccountEncryptionConfigured()) {
     console.warn(
       "Warning: ACCOUNT_ENCRYPTION_KEY is missing. Decryptability checks will be reported as non-decryptable."
     );
