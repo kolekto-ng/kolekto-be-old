@@ -1,6 +1,12 @@
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
-import { isAccountCipherDecryptable, describeCipherShape } from "../utils/accountEncryption.js";
+// Use the SAME decryption used by the live withdrawal path so the audit's
+// "decryptable" verdict matches what the app will actually be able to read.
+import {
+  decryptAccountNumber,
+  isAccountEncryptionConfigured,
+  describeCipherShape,
+} from "../utils/accountCrypto.js";
 
 dotenv.config();
 
@@ -18,7 +24,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 function canDecryptAccountNumber(cipherValue) {
-  return isAccountCipherDecryptable(cipherValue);
+  return !!decryptAccountNumber(cipherValue);
 }
 
 // CLI flags:
@@ -87,7 +93,7 @@ async function run() {
   console.log(
     `ACCOUNT_ENCRYPTION_KEY: ${keyRaw ? `present (length=${keyRaw.length})` : "MISSING"}`
   );
-  if (!keyRaw) {
+  if (!isAccountEncryptionConfigured()) {
     console.warn(
       "Warning: ACCOUNT_ENCRYPTION_KEY is missing. Decryptability checks will be reported as non-decryptable."
     );

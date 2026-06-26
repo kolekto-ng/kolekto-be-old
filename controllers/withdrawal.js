@@ -1,5 +1,8 @@
 import axios from "axios";
 import { supabase } from "../utils/client.js";
+// Decryption is centralised in utils/accountCrypto.js so the decrypt side here
+// can never drift from the encrypt side in controllers/settings/profile.js.
+import { decryptAccountNumber } from "../utils/accountCrypto.js";
 import { sendEmail } from "../services/emailService.js";
 import { computeWalletBalances, roundCurrency, normalizeContributions } from "../utils/financial.js";
 import { withdrawalRequestTemplate } from "../templates/withdrawalRequest.js";
@@ -7,7 +10,13 @@ import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawal
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
 import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
 import { listAdminEmails } from "../utils/requireAdmin.js";
-import { decryptAccountNumber } from "../utils/accountEncryption.js";
+import {
+    notifyWithdrawalApproved,
+    notifyWithdrawalFailed,
+    notifyWithdrawalProcessed,
+    notifyWithdrawalRejected,
+    notifyWithdrawalRequested,
+} from "../utils/pushNotifications.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 
@@ -15,6 +24,11 @@ const paystackHeaders = {
     Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
     "Content-Type": "application/json",
 };
+
+// Payout-account decryption (key derivation + every historical ciphertext
+// shape) lives in utils/accountCrypto.js. `decryptAccountNumber` is imported
+// at the top of this file and never throws — it returns null when a value
+// cannot be recovered with any candidate key.
 
 /**
  * Recompute wallet balances from source of truth and persist them.
@@ -550,6 +564,12 @@ export const requestWithdrawal = async (req, res) => {
             .eq("id", userId)
             .single();
 
+        await notifyWithdrawalRequested({
+            userId,
+            withdrawalId: insertedWithdrawal.id,
+            amount: withdrawalAmount,
+        });
+
         // Fire-and-forget email notifications
         (async () => {
             try {
@@ -690,6 +710,11 @@ export const handlePaystackWebhook = async (req, res) => {
 
             // Recompute balances from source of truth
             await refreshWallet(wallet.id, withdrawal.collection_id);
+            await notifyWithdrawalProcessed({
+                userId: withdrawal.user_id,
+                withdrawalId: withdrawal.id,
+                amount: withdrawal.amount,
+            });
 
         } else if (event === "transfer.failed" || event === "transfer.reversed") {
             const newStatus = event === "transfer.failed" ? "failed" : "reversed";
@@ -701,6 +726,12 @@ export const handlePaystackWebhook = async (req, res) => {
             // Refund available_balance since withdrawal won't proceed
             // Then recompute from source of truth
             await refreshWallet(wallet.id, withdrawal.collection_id);
+            await notifyWithdrawalFailed({
+                userId: withdrawal.user_id,
+                withdrawalId: withdrawal.id,
+                amount: withdrawal.amount,
+                status: newStatus,
+            });
         }
     }
 
@@ -789,6 +820,10 @@ export const getUserWithdrawals = async (req, res) => {
 export const approveWithdrawal = async (req, res) => {
     const { id: withdrawal_id } = req.body;
 
+    if (!withdrawal_id) {
+        return res.status(400).json({ error: "Withdrawal id is required" });
+    }
+
     const { data: withdrawal, error: withdrawalError } = await supabase
         .from("withdrawals")
         .select("*")
@@ -799,8 +834,12 @@ export const approveWithdrawal = async (req, res) => {
         return res.status(404).json({ error: "Withdrawal not found" });
     }
 
-    if (withdrawal.status === "success") {
-        return res.status(400).json({ error: "Withdrawal already approved" });
+    if (["approved", "success", "successful", "paid", "completed"].includes(withdrawal.status)) {
+        return res.status(409).json({ error: "Withdrawal already approved" });
+    }
+
+    if (!["pending", "processing"].includes(withdrawal.status)) {
+        return res.status(409).json({ error: `Cannot approve a ${withdrawal.status} withdrawal` });
     }
 
     const { data: wallet, error: walletError } = await supabase
@@ -813,17 +852,41 @@ export const approveWithdrawal = async (req, res) => {
         return res.status(404).json({ error: "Wallet not found" });
     }
 
-    // Mark withdrawal as approved. The admin panel writes "approved" via
-    // direct Supabase update for the manual-payout flow; using the same
-    // status here keeps the two paths consistent. Legacy rows with
-    // status="success" still count as completed in computeWalletBalances.
-    await supabase
+    // Only a still-pending request may transition to approved. The status
+    // predicate prevents two admins from approving the same request at once.
+    const { data: approvedRows, error: approveError } = await supabase
         .from("withdrawals")
         .update({ status: "approved", updated_at: new Date().toISOString() })
-        .eq("id", withdrawal.id);
+        .eq("id", withdrawal.id)
+        .in("status", ["pending", "processing"])
+        .select("id");
+
+    if (approveError) {
+        console.error("Withdrawal approval update failed:", approveError);
+        return res.status(500).json({
+            error: "Failed to approve withdrawal",
+            details: approveError.message,
+        });
+    }
+
+    if (!approvedRows?.length) {
+        return res.status(409).json({
+            error: "Withdrawal is no longer pending. Refresh and try again.",
+        });
+    }
 
     // Recompute all balances from source of truth
     const balances = await refreshWallet(wallet.id, withdrawal.collection_id);
+
+    // Approval is complete at this point. A push-provider outage must not
+    // turn this successful state transition into an HTTP 500 for the admin.
+    void notifyWithdrawalApproved({
+        userId: withdrawal.user_id,
+        withdrawalId: withdrawal.id,
+        amount: withdrawal.amount,
+    }).catch((err) => {
+        console.error("Withdrawal approved push notification failed:", err?.message || err);
+    });
 
     // Fire-and-forget email notifications
     (async () => {
@@ -933,6 +996,12 @@ export const rejectWithdrawal = async (req, res) => {
         .from("withdrawals")
         .update({ status: "rejected" })
         .eq("id", withdrawal.id);
+
+    await notifyWithdrawalRejected({
+        userId: withdrawal.user_id,
+        withdrawalId: withdrawal.id,
+        amount: withdrawal.amount,
+    });
 
     return res.status(200).json({ success: true, message: "Withdrawal rejected and available balance refunded successfully" });
 };

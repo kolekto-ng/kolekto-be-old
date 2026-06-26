@@ -1,4 +1,5 @@
 import { supabase } from "../../utils/client.js";
+import { notifyKycApproved, notifyKycRejected } from "../../utils/pushNotifications.js";
 
 // Helper function to update overall KYC status
 const updateKycOverallStatus = async (userId) => {
@@ -507,6 +508,12 @@ export const approveKyc = async (req, res) => {
             console.error("Failed to log history:", histError);
         }
 
+        await notifyKycApproved({
+            userId: updatedKyc.user_id,
+            verificationType: verification_type || "all",
+            kycId: updatedKyc.id,
+        });
+
         return res.status(200).json({
             message: actionMessage,
             kyc: updatedKyc,
@@ -637,6 +644,12 @@ export const rejectKyc = async (req, res) => {
         if (histError) {
             console.error("Failed to log history:", histError);
         }
+
+        await notifyKycRejected({
+            userId: updatedKyc.user_id,
+            verificationType: verification_type || "all",
+            kycId: updatedKyc.id,
+        });
 
         return res.status(200).json({
             message: actionMessage,

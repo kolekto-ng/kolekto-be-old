@@ -5,6 +5,10 @@ import crypto from "node:crypto";
 import { sendEmail } from "../services/emailService.js";
 import { sendPaymentInitialize, sendPaymentConfirmation } from "../utils/emailHelper.js";
 import {
+    notifyContributionByReference,
+    notifyPaymentIssue,
+} from "../utils/pushNotifications.js";
+import {
     calculateFees,
     computeWalletBalances,
     roundCurrency,
@@ -29,8 +33,15 @@ const PAYSTACK_BASE_URL = "https://api.paystack.co";
  * Returns { ok: boolean, status: number, body: any }.
  *
  * Exported so the F5 admin reconcile endpoint can reuse the same code path.
+ *
+ * @param {string} reference
+ * @param {string|null} [overrideCollectionId] - Manual recovery hint, only
+ *   used by the edge function when automatic metadata resolution (the
+ *   pending_payment_context row + Paystack's own metadata) both fail to
+ *   produce a collectionId. Supplied by an admin via Admin Reconcile after
+ *   confirming, out-of-band, which collection a stranded payment belongs to.
  */
-export async function invokeVerifyEdgeFunction(reference) {
+export async function invokeVerifyEdgeFunction(reference, overrideCollectionId = null) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey =
         process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -57,7 +68,7 @@ export async function invokeVerifyEdgeFunction(reference) {
     try {
         const res = await axios.post(
             url,
-            { reference },
+            overrideCollectionId ? { reference, overrideCollectionId } : { reference },
             {
                 headers: {
                     Authorization: `Bearer ${supabaseKey}`,
@@ -850,6 +861,24 @@ export const verifyPayment = async (req, res) => {
             return res.status(500).json({ error: depositError.message });
         }
 
+        if (deposit && deposit.collection_id && paystackData.status !== "success") {
+            const { data: collection } = await supabase
+                .from("collections")
+                .select("id, title, user_id")
+                .eq("id", deposit.collection_id)
+                .maybeSingle();
+
+            if (collection?.user_id) {
+                await notifyPaymentIssue({
+                    userId: collection.user_id,
+                    collectionId: collection.id,
+                    collectionTitle: collection.title,
+                    reference,
+                    status: paystackData.status,
+                });
+            }
+        }
+
         if (deposit && deposit.contributor_id && paystackData.status === "success") {
             // ── Step 1: Mark contribution as PAID first (wallet stats depend on this) ──
             const { data: collection } = await supabase
@@ -999,6 +1028,8 @@ export const verifyPayment = async (req, res) => {
                     }).catch((err) =>
                         console.error("Organizer email send error:", err?.message || err)
                     );
+
+                    // Successful-payment push is emitted by charge.success only.
                 }
             } catch (e) {
                 console.error("Organizer notification update error:", e?.message || e);
@@ -1182,6 +1213,26 @@ async function verifyPaystackSignature(req) {
     return hashHex === signature;
 }
 
+async function notifyOrganizerPushForReference(reference, source) {
+    if (!reference) return { sent: 0, skipped: true };
+
+    try {
+        const result = await notifyContributionByReference(reference);
+        console.log(`[webhook ref=${reference}] ORGANIZER_PUSH_${source}`, {
+            sent: result?.sent || 0,
+            duplicate: Boolean(result?.duplicate),
+            skipped: Boolean(result?.skipped),
+            error: result?.error?.message || null,
+        });
+        return result;
+    } catch (error) {
+        console.error(`[webhook ref=${reference}] ORGANIZER_PUSH_${source}_FAILED`, {
+            message: error?.message || error,
+        });
+        return { sent: 0, error };
+    }
+}
+
 // Handle Paystack webhook
 export const handleWebhook = async (req, res) => {
     // We expect a raw Buffer here (see app.js wiring). Parse defensively so a
@@ -1229,6 +1280,7 @@ export const handleWebhook = async (req, res) => {
                     console.log(
                         `[webhook ref=${reference}] WEBHOOK_ALREADY_PROCESSED — contribution already paid, no-op`
                     );
+                    await notifyOrganizerPushForReference(reference, "ALREADY_PAID");
                     return res
                         .status(200)
                         .send("Already processed");
@@ -1284,6 +1336,7 @@ export const handleWebhook = async (req, res) => {
                 console.log(
                     `[webhook ref=${reference}] WEBHOOK_VERIFY_RECOVERED status=${invokeResult.status}`
                 );
+                await notifyOrganizerPushForReference(reference, "VERIFY_RECOVERED");
                 return res.status(200).send("Recovered via edge function");
             }
             // Return 500 so Paystack retries — the edge function may have
@@ -1374,6 +1427,7 @@ export const handleWebhook = async (req, res) => {
 
         if (alreadyProcessed) {
             console.log("Deposit already processed by verifyPayment — wallet re-synced:", reference);
+            await notifyOrganizerPushForReference(reference, "ALREADY_PROCESSED");
             return res.status(200).send("Already processed — wallet re-synced");
         }
 
@@ -1472,10 +1526,13 @@ export const handleWebhook = async (req, res) => {
                 }).catch((err) =>
                     console.error("Organizer email send error:", err?.message || err)
                 );
+
             }
         } catch (e) {
             console.error("Organizer notification update error:", e?.message || e);
         }
+
+        await notifyOrganizerPushForReference(reference, "LEGACY_SAVED");
 
         // F4: legacy deposits path completed
         console.log(
@@ -1623,6 +1680,22 @@ export const sendReceiptNotification = async (req, res) => {
         } catch (err) {
             console.error("[sendReceiptNotification] ❌ Organizer email error:", err?.message);
         }
+    }
+
+    // ── Organizer + contributor PUSH ─────────────────────────────────────────
+    // The edge function (verify-paystack-payment) calls this endpoint on EVERY
+    // first-time confirmed payment, so it — not just the Paystack webhook — is a
+    // reliable trigger for the payment push. Relying only on the webhook means a
+    // misconfigured/blocked webhook URL silently kills ALL payment pushes even
+    // though payments, wallets and emails are fine. This call is fully
+    // idempotent: notifyContributionByReference dedupes on
+    // `contribution-paid:<reference>` (organizer) and `contributor-paid:<reference>`
+    // (contributor), so the webhook also firing never produces a second push.
+    // Best-effort and non-blocking — a push failure must never fail the receipt.
+    if (transactionRef) {
+        await notifyOrganizerPushForReference(transactionRef, "SEND_RECEIPT").catch((err) =>
+            console.error("[sendReceiptNotification] ❌ Organizer push error:", err?.message || err)
+        );
     }
 
     return res.status(200).json({ success: true, results });

@@ -1,5 +1,6 @@
 import { supabase } from '../utils/client.js';
 import { calculateFees } from '../utils/financial.js';
+import { notifyCollectionStatusChanged } from '../utils/pushNotifications.js';
 
 // Helper function to generate slug from title
 const generateSlug = (title) => {
@@ -459,7 +460,7 @@ export const updateCollectionStatus = async (req, res) => {
     // ── Ownership check ──────────────────────────────────────────────────────
     const { data: existing, error: ownerErr } = await supabase
         .from('collections')
-        .select('user_id')
+        .select('user_id, title, collection_type')
         .eq('id', collectionId)
         .single();
 
@@ -470,14 +471,27 @@ export const updateCollectionStatus = async (req, res) => {
         return res.status(403).json({ error: 'Forbidden: you do not own this collection' });
     }
 
+    // Capture the exact transition instant so the notification dedupe key is
+    // unique per transition (allows pause → reopen → pause again to each notify
+    // once, while a retry of the SAME transition stays deduped).
+    const transitionAt = new Date().toISOString();
     const { error } = await supabase
         .from('collections')
-        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .update({ status: newStatus, updated_at: transitionAt })
         .eq('id', collectionId);
 
     if (error) {
         return res.status(400).json({ error: error.message });
     }
+
+    await notifyCollectionStatusChanged({
+        userId: existing.user_id,
+        collectionId,
+        collectionTitle: existing.title,
+        status: newStatus,
+        collectionType: existing.collection_type,
+        transitionAt,
+    });
 
     return res.status(200).json({ message: "Collection status updated successfully." });
 };
