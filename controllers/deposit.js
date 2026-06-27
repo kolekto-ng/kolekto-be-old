@@ -710,7 +710,7 @@ export const verifyPayment = async (req, res) => {
                     tx.channel,
                     fallbackParticipants,
                     `${process.env.FRONTEND_URL}/payment/verify?reference=${reference}`,
-                    collection.title
+                    null
                 ).catch((err) =>
                     console.error("[verifyPayment fallback] email error:", err?.message || err)
                 );
@@ -816,7 +816,7 @@ export const verifyPayment = async (req, res) => {
                     existingDeposit.channel,
                     participants,
                     receiptUrl,
-                    collection?.title
+                    null
                 );
             }
         } catch (e) {
@@ -986,7 +986,7 @@ export const verifyPayment = async (req, res) => {
                         deposit.channel,
                         participants,
                         receiptUrl,
-                        coll?.title
+                        null
                     ).catch((err) =>
                         console.error("Contributor email send error:", err?.message || err)
                     );
@@ -1484,7 +1484,7 @@ export const handleWebhook = async (req, res) => {
                     deposit.channel,
                     participants,
                     receiptUrl,
-                    collection?.title
+                    null
                 ).catch((err) =>
                     console.error("Contributor email send error:", err?.message || err)
                 );
@@ -1594,6 +1594,16 @@ export const sendReceiptNotification = async (req, res) => {
         channel = "card",
         participants = [],
         collectionId,
+        // Premium-receipt fields (sent by the edge function; all optional so the
+        // template degrades gracefully if an older caller omits them).
+        collectionType,
+        collectionDescription,
+        contributionAmount,
+        platformFee,
+        gatewayFee,
+        transactionId,
+        organizerName,
+        uniqueCodes,
     } = req.body || {};
 
     if (!payerEmail || !collectionTitle || !transactionRef) {
@@ -1617,7 +1627,18 @@ export const sendReceiptNotification = async (req, res) => {
             channel,
             participants,
             `${process.env.FRONTEND_URL}/payment/verify?reference=${transactionRef}`,
-            collectionTitle
+            organizerName || null,
+            {
+                collectionType,
+                collectionDescription,
+                contributionAmount,
+                platformFee,
+                gatewayFee,
+                totalPaid,
+                transactionId,
+                organizerName: organizerName || undefined,
+                uniqueCodes,
+            }
         );
         console.log("[sendReceiptNotification] ✅ Contributor email sent to", payerEmail);
     } catch (err) {
