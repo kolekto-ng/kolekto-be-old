@@ -387,7 +387,7 @@ export const editCollection = async (req, res) => {
     // ── Ownership check ──────────────────────────────────────────────────────
     const { data: existing, error: ownerErr } = await supabase
         .from('collections')
-        .select('user_id')
+        .select('user_id, price_tiers')
         .eq('id', id)
         .single();
 
@@ -408,14 +408,43 @@ export const editCollection = async (req, res) => {
         collectionType
     } = req.body;
 
+    // price_tiers carries two kinds of fields: ones the host edits (name,
+    // price, quantity, description, prefix) and ones only the payment
+    // verifier computes (sold_quantity, remaining_quantity — see
+    // refreshCollectionAndWallets in verify-paystack-payment/index.ts). The
+    // edit form only ever sends the host-editable ones, so a raw overwrite
+    // here wipes the sold/remaining counts back to absent on every save.
+    // Re-attach them from the currently-persisted tier (matched by id, then
+    // name) so editing a collection never resets its sold-ticket counters.
+    const mergeTierComputedFields = (incomingTiers, existingTiers) => {
+        if (!Array.isArray(incomingTiers)) return incomingTiers;
+        const existingByKey = new Map();
+        for (const t of Array.isArray(existingTiers) ? existingTiers : []) {
+            const key = String(t?.id ?? t?.name ?? '');
+            if (key) existingByKey.set(key, t);
+        }
+        return incomingTiers.map((tier) => {
+            const key = String(tier?.id ?? tier?.name ?? '');
+            const match = existingByKey.get(key);
+            return {
+                ...tier,
+                sold_quantity: match?.sold_quantity ?? tier?.sold_quantity ?? 0,
+                remaining_quantity: match?.remaining_quantity ?? tier?.remaining_quantity ?? null,
+            };
+        });
+    };
+
     // Prepare update data
+    const isTieredOrTicket = collectionType === 'tiered' || collectionType === 'ticket';
     const updateData = {
         title,
         description,
         deadline,
         max_contributions: collectionType === 'fixed' ? (max_contributions || null) : null,
         contributions_fields: Array.isArray(contributions_fields) && contributions_fields.length > 0 ? contributions_fields : null,
-        price_tiers: collectionType === 'tiered' ? price_tiers : null,
+        price_tiers: isTieredOrTicket
+            ? mergeTierComputedFields(price_tiers, existing.price_tiers)
+            : null,
         updated_at: new Date().toISOString()
     };
 
