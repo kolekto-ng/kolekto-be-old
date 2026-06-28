@@ -5,7 +5,7 @@
 
 import express from "express";
 import { reconcilePayment } from "../../controllers/admin/payments.js";
-import { getCollectionWalletLive } from "../../controllers/admin/wallet.js";
+import { getCollectionWalletLive, getUserWalletLive } from "../../controllers/admin/wallet.js";
 import verifyToken from "../../utils/verifyToken.js";
 import requireAdmin from "../../utils/requireAdmin.js";
 
@@ -38,6 +38,20 @@ router.get(
     verifyToken,
     requireAdmin,
     getCollectionWalletLive
+);
+
+// GET /api/adminurlabdkole/users/:userId/wallet-live
+//
+// Account-level live wallet snapshot for a user, summed across all their
+// collections using the SAME pooled computeWalletBalances() the host dashboard
+// uses (controllers/dashboard.js#getDashboardStats). Replaces the admin panel's
+// stale "sum of cached wallets columns" so admin and host totals always agree.
+// Read-only.
+router.get(
+    "/users/:userId/wallet-live",
+    verifyToken,
+    requireAdmin,
+    getUserWalletLive
 );
 
 export default router;

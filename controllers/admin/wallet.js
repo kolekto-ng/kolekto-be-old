@@ -125,3 +125,143 @@ export const getCollectionWalletLive = async (req, res) => {
     });
   }
 };
+
+// Account-level live wallet snapshot for a user (admin view).
+//
+// Root cause this addresses:
+//   Admin's UserDetailPage builds account totals by SUMMING the cached
+//   `wallets` columns (ledger_balance/available_balance/pending_balance/
+//   net_payment) across the user's collections. Those columns are only
+//   re-derived when a contribution/withdrawal mutates a wallet — so legacy
+//   withdrawals approved before the recompute-on-approval logic existed (and
+//   collections that have had no activity since) still carry pre-withdrawal
+//   balances. The cached sum therefore over-reports by roughly the amount
+//   already withdrawn, diverging from the host dashboard.
+//
+// Fix: recompute the account total live from the SAME source of truth and the
+// SAME pooled computeWalletBalances() call the host uses in
+// controllers/dashboard.js#getDashboardStats — so admin and host always agree.
+// Read-only; never writes; reuses canonical financial.js helpers verbatim.
+//
+// This intentionally mirrors getDashboardStats almost line-for-line, swapping
+// `req.user.id` for the `:userId` route param (admins may view any user).
+export const getUserWalletLive = async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    if (!userId) {
+      return res.status(400).json({ error: "User ID is required" });
+    }
+
+    const { data: collections, error: collectionsError } = await supabase
+      .from("collections")
+      .select("id, status, fee_bearer, collection_type")
+      .eq("user_id", userId);
+
+    if (collectionsError) throw collectionsError;
+
+    const rows = collections || [];
+    const collectionIds = rows.map((c) => c.id);
+    const totalCollections = rows.length;
+    const activeCollections = rows.filter((c) => c.status === "active").length;
+
+    if (collectionIds.length === 0) {
+      return res.status(200).json({
+        userId,
+        totalCollections,
+        activeCollections,
+        totalBalance: 0,
+        availableBalance: 0,
+        pendingBalance: 0,
+        totalRaised: 0,
+        withdrawn: 0,
+        pendingWithdrawalRequests: 0,
+        cutoffUtc: getSettlementCutoff().toISOString(),
+        source: "live",
+        computedAt: new Date().toISOString(),
+      });
+    }
+
+    const [
+      { data: contributions, error: contributionsError },
+      { data: withdrawals, error: withdrawalsError },
+    ] = await Promise.all([
+      supabase
+        .from("contributions")
+        .select("collection_id, amount, gross_amount, created_at")
+        .in("collection_id", collectionIds)
+        .eq("status", "paid"),
+      supabase
+        .from("withdrawals")
+        .select("amount, status")
+        .in("collection_id", collectionIds),
+    ]);
+
+    if (contributionsError) throw contributionsError;
+    if (withdrawalsError) throw withdrawalsError;
+
+    const collectionMap = new Map(rows.map((c) => [c.id, c]));
+
+    // Normalize per collection (fee_bearer/type differ per collection), then
+    // pool — identical to getDashboardStats so the numbers are bit-for-bit
+    // the same as the host dashboard.
+    const contribsByCollection = new Map();
+    for (const row of contributions || []) {
+      const list = contribsByCollection.get(row.collection_id) || [];
+      list.push(row);
+      contribsByCollection.set(row.collection_id, list);
+    }
+
+    const normalizedContributions = [];
+    for (const [colId, list] of contribsByCollection) {
+      const col = collectionMap.get(colId);
+      const normalized = normalizeContributions(
+        list,
+        col?.fee_bearer || "organizer",
+        col?.collection_type || "fixed",
+      );
+      normalizedContributions.push(...normalized);
+    }
+
+    const withdrawalRows = withdrawals || [];
+    const balances = computeWalletBalances(
+      normalizedContributions,
+      withdrawalRows,
+    );
+
+    const pendingWithdrawalRequests = roundCurrency(
+      withdrawalRows
+        .filter((row) =>
+          ["pending", "processing"].includes(
+            String(row.status || "").toLowerCase(),
+          ),
+        )
+        .reduce((sum, row) => sum + Number(row.amount || 0), 0),
+    );
+
+    const totalBalance = balances.ledgerBalance;
+    const availableBalance = Math.max(
+      0,
+      balances.availableBalance - pendingWithdrawalRequests,
+    );
+
+    return res.status(200).json({
+      userId,
+      totalCollections,
+      activeCollections,
+      totalBalance,
+      availableBalance,
+      pendingBalance: balances.pendingBalance,
+      totalRaised: balances.netPayment,
+      withdrawn: balances.completedWithdrawals,
+      pendingWithdrawalRequests,
+      cutoffUtc: getSettlementCutoff().toISOString(),
+      source: "live",
+      computedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: err.message || "Failed to compute live account wallet snapshot",
+    });
+  }
+};
