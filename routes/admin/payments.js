@@ -5,6 +5,7 @@
 
 import express from "express";
 import { reconcilePayment } from "../../controllers/admin/payments.js";
+import { getCollectionWalletLive } from "../../controllers/admin/wallet.js";
 import verifyToken from "../../utils/verifyToken.js";
 import requireAdmin from "../../utils/requireAdmin.js";
 
@@ -24,6 +25,19 @@ router.post(
     verifyToken,
     requireAdmin,
     reconcilePayment
+);
+
+// GET /api/adminurlabdkole/collections/:id/wallet-live
+//
+// Read-only, live-recomputed wallet snapshot for any collection. Reuses the
+// canonical computeWalletBalances() so the admin sees the same settled vs.
+// pending split the host dashboard computes per-request, instead of the
+// (potentially stale-after-settlement) cached `wallets` columns. Never writes.
+router.get(
+    "/collections/:id/wallet-live",
+    verifyToken,
+    requireAdmin,
+    getCollectionWalletLive
 );
 
 export default router;
