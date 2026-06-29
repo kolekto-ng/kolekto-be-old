@@ -310,7 +310,8 @@ export const getUserCollections = async (req, res) => {
                     currency_symbol
                 )
             `)
-            .eq('user_id', user_id);
+            .eq('user_id', user_id)
+            .neq('status', 'deleted');
 
         if (error) {
             return res.status(500).json({ error: error.message });

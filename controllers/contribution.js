@@ -68,10 +68,15 @@ export const getSingleCollection = async (req, res) => {
 
     const { data, error } = await query.single();
 
-    console.log(data, 'collection data');
-
     if (error) {
         return res.status(404).json({ message: error.message });
+    }
+
+    // A deleted collection is archived (status='deleted'), not removed from the
+    // DB — payment/withdrawal records are preserved for the host — but
+    // contributors must never be able to view or pay into it.
+    if (data?.status === 'deleted') {
+        return res.status(404).json({ message: 'Collection not found' });
     }
 
     // Check if collection is full
