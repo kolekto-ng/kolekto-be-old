@@ -40,8 +40,12 @@ const PAYSTACK_BASE_URL = "https://api.paystack.co";
  *   pending_payment_context row + Paystack's own metadata) both fail to
  *   produce a collectionId. Supplied by an admin via Admin Reconcile after
  *   confirming, out-of-band, which collection a stranded payment belongs to.
+ * @param {string|null} [overrideSelectedTierId] - Manual recovery hint for
+ *   `tiered` collections. The edge function auto-infers the tier from the
+ *   verified Paystack amount when this is omitted; only needed when two or
+ *   more tiers share the same price (amount inference is then ambiguous).
  */
-export async function invokeVerifyEdgeFunction(reference, overrideCollectionId = null) {
+export async function invokeVerifyEdgeFunction(reference, overrideCollectionId = null, overrideSelectedTierId = null) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey =
         process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -66,9 +70,13 @@ export async function invokeVerifyEdgeFunction(reference, overrideCollectionId =
     const timeoutId = setTimeout(() => controller.abort(), 25000);
 
     try {
+        const body = { reference };
+        if (overrideCollectionId) body.overrideCollectionId = overrideCollectionId;
+        if (overrideSelectedTierId) body.overrideSelectedTierId = overrideSelectedTierId;
+
         const res = await axios.post(
             url,
-            overrideCollectionId ? { reference, overrideCollectionId } : { reference },
+            body,
             {
                 headers: {
                     Authorization: `Bearer ${supabaseKey}`,

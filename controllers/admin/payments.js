@@ -33,6 +33,12 @@ export const reconcilePayment = async (req, res) => {
     // timestamp) and pastes its ID here.
     const collectionId = String(req.body?.collectionId || "").trim() || null;
 
+    // Manual tier recovery hint for `tiered` collections — only needed when
+    // the edge function's amount-based tier inference is ambiguous (two or
+    // more tiers share the same price). Tier ids are organizer-defined
+    // (often a timestamp-like string, not a UUID), so no UUID format check.
+    const selectedTierId = String(req.body?.selectedTierId || "").trim() || null;
+
     if (!reference) {
         return res.status(400).json({
             error: "Paystack reference is required.",
@@ -61,10 +67,11 @@ export const reconcilePayment = async (req, res) => {
 
     console.log(
         `[reconcile ref=${reference}] RECONCILE_REQUESTED by admin=${adminEmail}` +
-            (collectionId ? ` collectionIdOverride=${collectionId}` : "")
+            (collectionId ? ` collectionIdOverride=${collectionId}` : "") +
+            (selectedTierId ? ` selectedTierIdOverride=${selectedTierId}` : "")
     );
 
-    const result = await invokeVerifyEdgeFunction(reference, collectionId);
+    const result = await invokeVerifyEdgeFunction(reference, collectionId, selectedTierId);
 
     if (result.ok) {
         console.log(
