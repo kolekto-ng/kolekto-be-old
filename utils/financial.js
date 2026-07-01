@@ -241,3 +241,31 @@ export function computeWalletBalances(paidContributions, withdrawals) {
         completedWithdrawals,
     };
 }
+
+/**
+ * Normalizes contribution rows, correcting legacy rows where gross_amount is 0 or null
+ * by calculating the net amount (deducting fees if organizer-borne).
+ * 
+ * @param {Array} contributions 
+ * @param {string} feeBearer 
+ * @param {string} collectionType 
+ * @returns {Array} Normalized contributions
+ */
+export function normalizeContributions(contributions, feeBearer = "organizer", collectionType = "fixed") {
+    return (contributions || []).map((row) => {
+        const gross = Number(row.gross_amount || row.amount || 0);
+        if (gross === 0) return row;
+
+        const { totalFees } = calculateFees(gross, collectionType, feeBearer);
+        const net = feeBearer === "organizer"
+            ? roundCurrency(gross - totalFees)
+            : deriveNetContribution(gross, collectionType, feeBearer);
+
+        return {
+            ...row,
+            amount: net,
+            gross_amount: gross,
+        };
+    });
+}
+

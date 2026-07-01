@@ -8,9 +8,11 @@ import {
     calculateFees,
     computeWalletBalances,
     roundCurrency,
+    normalizeContributions,
+    deriveNetContribution,
 } from "../utils/financial.js";
 
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
 
 /**
@@ -312,12 +314,17 @@ export async function updateWalletStats(collectionId, grossAmountPaid) {
             );
             return;
         }
-
         // Pull everything we need to compute the canonical balances.
         const [
+            { data: collection, error: colError },
             { data: contributions, error: contribError },
             { data: withdrawals, error: withError },
         ] = await Promise.all([
+            supabase
+                .from("collections")
+                .select("fee_bearer, collection_type")
+                .eq("id", collectionId)
+                .single(),
             supabase
                 .from("contributions")
                 .select("amount, gross_amount, created_at")
@@ -329,15 +336,21 @@ export async function updateWalletStats(collectionId, grossAmountPaid) {
                 .eq("collection_id", collectionId),
         ]);
 
-        if (contribError || withError) {
+        if (colError || contribError || withError) {
             console.error(
                 "[updateWalletStats] source fetch failed:",
-                (contribError || withError)?.message
+                (colError || contribError || withError)?.message
             );
             return;
         }
 
-        const balances = computeWalletBalances(contributions || [], withdrawals || []);
+        const normalized = normalizeContributions(
+            contributions || [],
+            collection?.fee_bearer || "organizer",
+            collection?.collection_type || "fixed"
+        );
+
+        const balances = computeWalletBalances(normalized, withdrawals || []);
 
         const { error: updateError } = await supabase
             .from("wallets")
@@ -916,9 +929,15 @@ export const verifyPayment = async (req, res) => {
             // ── Step 1: Mark contribution as PAID first (wallet stats depend on this) ──
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix")
+                .select("code_prefix, collection_type, fee_bearer")
                 .eq("id", deposit.collection_id)
                 .single();
+
+            const netAmount = deriveNetContribution(
+                deposit.amount,
+                collection?.collection_type || "fixed",
+                collection?.fee_bearer || "organizer"
+            );
 
             // B-3: atomic per-collection counter via the Postgres RPC.
             if (collection?.code_prefix) {
@@ -933,6 +952,7 @@ export const verifyPayment = async (req, res) => {
                         status: "paid",
                         contributor_unique_code: uniqueCode,
                         payment_reference: deposit.payment_reference,
+                        amount: netAmount,
                         gross_amount: deposit.amount,
                         updated_at: new Date().toISOString(),
                     })
@@ -943,6 +963,7 @@ export const verifyPayment = async (req, res) => {
                     .update({
                         status: "paid",
                         payment_reference: deposit.payment_reference,
+                        amount: netAmount,
                         gross_amount: deposit.amount,
                         updated_at: new Date().toISOString(),
                     })
@@ -1367,9 +1388,15 @@ export const handleWebhook = async (req, res) => {
             // ── Step 1: Mark contribution PAID (wallet depends on this) ──────
             const { data: collection } = await supabase
                 .from("collections")
-                .select("code_prefix")
+                .select("code_prefix, collection_type, fee_bearer")
                 .eq("id", deposit.collection_id)
                 .single();
+
+            const netAmount = deriveNetContribution(
+                deposit.amount,
+                collection?.collection_type || "fixed",
+                collection?.fee_bearer || "organizer"
+            );
 
             // B-3: atomic per-collection counter via the Postgres RPC.
             if (collection?.code_prefix) {
@@ -1384,6 +1411,7 @@ export const handleWebhook = async (req, res) => {
                         status: "paid",
                         contributor_unique_code: uniqueCode,
                         payment_reference: deposit.payment_reference,
+                        amount: netAmount,
                         gross_amount: deposit.amount,
                         updated_at: new Date().toISOString(),
                     })
@@ -1394,6 +1422,7 @@ export const handleWebhook = async (req, res) => {
                     .update({
                         status: "paid",
                         payment_reference: deposit.payment_reference,
+                        amount: netAmount,
                         gross_amount: deposit.amount,
                         updated_at: new Date().toISOString(),
                     })

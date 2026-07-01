@@ -18,6 +18,7 @@ import ambassadorRouter from "./routes/ambassador.js";
 import adminAmbassadorsRouter from "./routes/admin/ambassadors.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
+import { getAccountEncryptionStatus } from "./utils/accountCrypto.js";
 import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
 // Imported directly so we can mount the webhook route with a RAW body parser
 // before the global JSON parser. See B-1 below.
@@ -118,8 +119,39 @@ const initializeEmailService = async () => {
     }
 };
 
-app.listen(port, async () => {
+// Fail loudly in the LOGS (never in the user UI) if bank-account encryption is
+// misconfigured. Bank add + withdrawal both depend on ACCOUNT_ENCRYPTION_KEY;
+// a missing/weak/reformatted key is the single most common cause of the
+// "encryption error" users hit. This runs once at boot so ops can spot it
+// immediately instead of via a failed user action.
+const verifyAccountEncryptionConfig = () => {
+    const status = getAccountEncryptionStatus();
+    if (!status.configured) {
+        console.error(
+            "❌ ACCOUNT_ENCRYPTION_KEY is NOT set. Bank account setup and " +
+            "withdrawals will fail. Set it in the environment before serving traffic."
+        );
+        return;
+    }
+    if (status.hadSurroundingWhitespaceOrQuotes) {
+        console.warn(
+            "⚠️ ACCOUNT_ENCRYPTION_KEY had surrounding quotes/whitespace; it has " +
+            "been sanitised at runtime. Older ciphertext is still recovered via " +
+            "fallback keys, but consider cleaning the env var so the raw value matches."
+        );
+    }
+    if (status.weak) {
+        console.warn(
+            "⚠️ ACCOUNT_ENCRYPTION_KEY is shorter than 16 characters. It still " +
+            "works (SHA-256 widens it) but a longer secret is strongly recommended."
+        );
+    }
+    console.log("✅ Account encryption key configured");
+};
+
+app.listen(port, '0.0.0.0', async () => {
     console.log(`Server Running on port ${port}`);
+    verifyAccountEncryptionConfig();
     // Initialize email service on startup, but don't block the API in dev
     if (process.env.NODE_ENV === "production") {
         await initializeEmailService();

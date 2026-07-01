@@ -1,5 +1,5 @@
 import { supabase } from "../utils/client.js";
-import { roundCurrency } from "../utils/financial.js";
+import { roundCurrency, normalizeContributions, computeWalletBalances } from "../utils/financial.js";
 
 const FINAL_WITHDRAWAL_STATUSES = new Set(["success", "completed", "processed"]);
 const WAT_OFFSET_HOURS = 1;
@@ -20,13 +20,14 @@ function getSettlementCutoffUtc(now = new Date()) {
     return cutoffUtc;
 }
 
+
 export const getDashboardStats = async (req, res) => {
     const userId = req.user.id;
 
     try {
         const { data: collections, error: collectionsError } = await supabase
             .from("collections")
-            .select("id, status")
+            .select("id, status, fee_bearer, collection_type")
             .eq("user_id", userId);
 
         if (collectionsError) {
@@ -54,7 +55,7 @@ export const getDashboardStats = async (req, res) => {
         const [{ data: contributions, error: contributionsError }, { data: withdrawals, error: withdrawalsError }] = await Promise.all([
             supabase
                 .from("contributions")
-                .select("amount, created_at")
+                .select("collection_id, amount, gross_amount, created_at")
                 .in("collection_id", collectionIds)
                 .eq("status", "paid"),
             supabase
@@ -66,37 +67,41 @@ export const getDashboardStats = async (req, res) => {
         if (contributionsError) throw contributionsError;
         if (withdrawalsError) throw withdrawalsError;
 
-        const contributionRows = contributions || [];
+        const collectionMap = new Map(rows.map((c) => [c.id, c]));
+
+        // Group contributions by collection to normalize them
+        const contribsByCollection = new Map();
+        for (const row of contributions || []) {
+            const list = contribsByCollection.get(row.collection_id) || [];
+            list.push(row);
+            contribsByCollection.set(row.collection_id, list);
+        }
+
+        const normalizedContributions = [];
+        for (const [colId, list] of contribsByCollection) {
+            const col = collectionMap.get(colId);
+            const normalized = normalizeContributions(
+                list,
+                col?.fee_bearer || "organizer",
+                col?.collection_type || "fixed"
+            );
+            normalizedContributions.push(...normalized);
+        }
+
         const withdrawalRows = withdrawals || [];
         const cutoffUtc = getSettlementCutoffUtc();
 
-        const totalCollected = contributionRows.reduce(
-            (sum, row) => sum + Number(row.amount || 0),
-            0
+        const balances = computeWalletBalances(normalizedContributions, withdrawalRows);
+
+        const pendingWithdrawalRequests = roundCurrency(
+            withdrawalRows
+                .filter((row) => ["pending", "processing"].includes(String(row.status || "").toLowerCase()))
+                .reduce((sum, row) => sum + Number(row.amount || 0), 0)
         );
 
-        const pendingBalance = contributionRows
-            .filter((row) => {
-                if (!row.created_at) return false;
-                const createdAt = new Date(row.created_at);
-                return !Number.isNaN(createdAt.getTime()) && createdAt >= cutoffUtc;
-            })
-            .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-
-    const successfulWithdrawals = withdrawalRows
-        .filter((row) => FINAL_WITHDRAWAL_STATUSES.has(String(row.status || "").toLowerCase()))
-        .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-
-    const approvedWithdrawals = withdrawalRows
-        .filter((row) => String(row.status || "").toLowerCase() === "approved")
-        .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-
-    const pendingWithdrawalRequests = withdrawalRows
-        .filter((row) => String(row.status || "").toLowerCase() === "pending")
-        .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-
-    const totalBalance = Math.max(0, totalCollected - successfulWithdrawals);
-    const availableBalance = Math.max(0, totalBalance - pendingBalance - pendingWithdrawalRequests - approvedWithdrawals);
+        const totalBalance = balances.ledgerBalance;
+        const availableBalance = Math.max(0, balances.availableBalance - pendingWithdrawalRequests);
+        const pendingBalance = balances.pendingBalance;
 
         return res.status(200).json({
             totalCollections,
@@ -104,8 +109,8 @@ export const getDashboardStats = async (req, res) => {
             totalBalance,
             availableBalance,
             pendingBalance,
-            totalRaised: totalCollected,
-            pendingWithdrawalRequests: 0,
+            totalRaised: balances.netPayment,
+            pendingWithdrawalRequests,
             cutoffUtc: cutoffUtc.toISOString(),
         });
     } catch (err) {
@@ -114,7 +119,6 @@ export const getDashboardStats = async (req, res) => {
         });
     }
 };
-
 export const getCollectionDashboardStats = async (req, res) => {
     const userId = req.user.id;
     const { collectionId } = req.params;
@@ -126,7 +130,7 @@ export const getCollectionDashboardStats = async (req, res) => {
 
         const { data: collection, error: collectionError } = await supabase
             .from("collections")
-            .select("id, user_id, status")
+            .select("id, user_id, status, fee_bearer, collection_type")
             .eq("id", collectionId)
             .single();
 
@@ -141,7 +145,7 @@ export const getCollectionDashboardStats = async (req, res) => {
         const [{ data: contributions, error: contributionsError }, { data: withdrawals, error: withdrawalsError }] = await Promise.all([
             supabase
                 .from("contributions")
-                .select("amount, created_at")
+                .select("amount, gross_amount, created_at")
                 .eq("collection_id", collectionId)
                 .eq("status", "paid"),
             supabase
@@ -157,47 +161,34 @@ export const getCollectionDashboardStats = async (req, res) => {
         const withdrawalRows = withdrawals || [];
         const cutoffUtc = getSettlementCutoffUtc();
 
-        const totalCollected = contributionRows.reduce(
-            (sum, row) => sum + Number(row.amount || 0),
-            0
+        const normalized = normalizeContributions(
+            contributionRows,
+            collection.fee_bearer || "organizer",
+            collection.collection_type || "fixed"
         );
 
-        const pendingBalance = contributionRows
-            .filter((row) => {
-                if (!row.created_at) return false;
-                const createdAt = new Date(row.created_at);
-                return !Number.isNaN(createdAt.getTime()) && createdAt >= cutoffUtc;
-            })
-            .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+        const balances = computeWalletBalances(normalized, withdrawalRows);
 
-        const successfulWithdrawals = withdrawalRows
-            .filter((row) => FINAL_WITHDRAWAL_STATUSES.has(String(row.status || "").toLowerCase()))
-            .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-
-        const approvedWithdrawals = withdrawalRows
-            .filter((row) => String(row.status || "").toLowerCase() === "approved")
-            .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-
-        const pendingWithdrawalRequests = withdrawalRows
-            .filter((row) => String(row.status || "").toLowerCase() === "pending")
-            .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-
-        const totalBalance = Math.max(0, totalCollected);
-        const availableBalance = Math.max(
-            0,
-            totalCollected - pendingBalance - pendingWithdrawalRequests - successfulWithdrawals - approvedWithdrawals
+        const pendingWithdrawalRequests = roundCurrency(
+            withdrawalRows
+                .filter((row) => ["pending", "processing"].includes(String(row.status || "").toLowerCase()))
+                .reduce((sum, row) => sum + Number(row.amount || 0), 0)
         );
-        const paidContributionsCount = contributionRows.length;
+
+        const totalBalance = balances.ledgerBalance;
+        const availableBalance = Math.max(0, balances.availableBalance - pendingWithdrawalRequests);
+        const pendingBalance = balances.pendingBalance;
+        const paidContributionsCount = normalized.length;
 
         // Total withdrawn = anything that has hit the user's bank account
         // (success/completed/successful from the legacy Paystack-transfer
         // flow) plus anything the admin manually marked approved.
-        const totalWithdrawn = roundCurrency(successfulWithdrawals + approvedWithdrawals);
+        const totalWithdrawn = balances.completedWithdrawals;
 
         return res.status(200).json({
             collectionId,
             collectionStatus: collection.status,
-            totalRaised: totalCollected,
+            totalRaised: balances.netPayment,
             totalBalance,
             availableBalance,
             pendingBalance,
@@ -207,8 +198,16 @@ export const getCollectionDashboardStats = async (req, res) => {
             // and `approvedWithdrawals` broken out separately for any
             // future admin/reporting views.
             withdrawn: totalWithdrawn,
-            successfulWithdrawals: roundCurrency(successfulWithdrawals),
-            approvedWithdrawals: roundCurrency(approvedWithdrawals),
+            successfulWithdrawals: roundCurrency(
+                withdrawalRows
+                    .filter((row) => ["success", "successful", "completed"].includes(String(row.status || "").toLowerCase()))
+                    .reduce((sum, row) => sum + Number(row.amount || 0), 0)
+            ),
+            approvedWithdrawals: roundCurrency(
+                withdrawalRows
+                    .filter((row) => String(row.status || "").toLowerCase() === "approved")
+                    .reduce((sum, row) => sum + Number(row.amount || 0), 0)
+            ),
             paidContributionsCount,
             cutoffUtc: cutoffUtc.toISOString(),
         });
@@ -218,7 +217,6 @@ export const getCollectionDashboardStats = async (req, res) => {
         });
     }
 };
-
 // Maps a withdrawal row's `status` column to the activity `type` the FE
 // renderer (components/dashboard/ActivityOverview.tsx#getActivityMeta)
 // already handles. Keep the strings in sync with that file.

@@ -10,10 +10,9 @@
  *
  * No custom RPC function is required — all logic runs in the application layer.
  */
-
 import cron from "node-cron";
 import { createClient } from "@supabase/supabase-js";
-import { computeWalletBalances } from "../utils/financial.js";
+import { computeWalletBalances, normalizeContributions } from "../utils/financial.js";
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -46,29 +45,43 @@ async function runDailySettlement() {
 
     for (const wallet of wallets) {
         try {
-            const [{ data: contributions, error: contribError }, { data: withdrawals, error: withError }] =
-                await Promise.all([
-                    supabase
-                        .from("contributions")
-                        .select("amount, gross_amount, created_at")
-                        .eq("collection_id", wallet.collection_id)
-                        .eq("status", "paid"),
-                    supabase
-                        .from("withdrawals")
-                        .select("amount, status")
-                        .eq("collection_id", wallet.collection_id),
-                ]);
+            const [
+                { data: collection, error: colError },
+                { data: contributions, error: contribError },
+                { data: withdrawals, error: withError }
+            ] = await Promise.all([
+                supabase
+                    .from("collections")
+                    .select("fee_bearer, collection_type")
+                    .eq("id", wallet.collection_id)
+                    .single(),
+                supabase
+                    .from("contributions")
+                    .select("amount, gross_amount, created_at")
+                    .eq("collection_id", wallet.collection_id)
+                    .eq("status", "paid"),
+                supabase
+                    .from("withdrawals")
+                    .select("amount, status")
+                    .eq("collection_id", wallet.collection_id),
+            ]);
 
-            if (contribError || withError) {
+            if (colError || contribError || withError) {
                 console.error(
                     `[settlement] Error fetching data for collection ${wallet.collection_id}:`,
-                    contribError || withError
+                    colError || contribError || withError
                 );
                 failed++;
                 continue;
             }
 
-            const balances = computeWalletBalances(contributions || [], withdrawals || []);
+            const normalized = normalizeContributions(
+                contributions || [],
+                collection?.fee_bearer || "organizer",
+                collection?.collection_type || "fixed"
+            );
+
+            const balances = computeWalletBalances(normalized, withdrawals || []);
 
             const { error: updateError } = await supabase
                 .from("wallets")
