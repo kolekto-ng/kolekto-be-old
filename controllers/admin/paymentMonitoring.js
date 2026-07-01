@@ -180,6 +180,25 @@ export const getPaymentMonitoring = async (req, res) => {
         // the frontend callback or webhook.
         const awaitingRecovery = byCategory("orphaned").length + byCategory("failed").length;
 
+        // TRUE IN-FLIGHT COUNT: every initiated checkout that has no
+        // contribution yet, regardless of age or recovery status. This is the
+        // number that answers "how many payments are mid-lifecycle right now?"
+        //   - "pending"  (<5 min) — callback/webhook hasn't fired yet
+        //   - "orphaned" (≥5 min) — missed by callback AND webhook, sweep will act
+        //   - "failed"   (≥5 min) — recovery was attempted but didn't succeed yet
+        // This was the gap: the old banner only showed awaitingRecovery (≥5 min),
+        // which made fresh missed payments invisible to admins watching the dashboard.
+        const awaitingContribution = items.filter((i) => !i.contribution && !i.isResolved).length;
+
+        // Combined "awaiting" view: all no-contribution items sorted newest first.
+        // Gives admins a single tab to answer "what payments don't have a
+        // contribution yet?" without splitting their attention across three tabs.
+        const awaitingItems = [
+            ...byCategory("pending"),
+            ...byCategory("orphaned"),
+            ...byCategory("failed"),
+        ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
         // Sweep runs on a '*/5 * * * *' cron schedule (see migration /
         // scheduled-payment-recovery deploy) — next tick is the next
         // multiple-of-5 minute boundary from server time now.
@@ -197,11 +216,17 @@ export const getPaymentMonitoring = async (req, res) => {
                 avgRecoveryMs,
                 mttrMs,
                 awaitingRecovery,
+                awaitingContribution,
                 nextSweepInSeconds: secondsUntilNextSweep,
                 successRateBySource,
+                // Snapshot timestamp lets the frontend show "as of HH:MM:SS" even
+                // after client-side auto-refresh so admins know exactly how fresh
+                // the data is without relying on browser clocks.
+                serverNow: now.toISOString(),
             },
             categories: {
                 all: items,
+                awaiting: awaitingItems,
                 successful: byCategory("successful"),
                 pending: byCategory("pending"),
                 recovered: byCategory("recovered"),
