@@ -16,8 +16,11 @@ import adminRouter from "./routes/admin/kyc.js";
 import adminPaymentsRouter from "./routes/admin/payments.js";
 import adminPaymentMonitoringRouter from "./routes/admin/paymentMonitoring.js";
 import pushRouter from "./routes/push.js";
+import ambassadorRouter from "./routes/ambassador.js";
+import adminAmbassadorsRouter from "./routes/admin/ambassadors.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
+import { verifyAmbassadorEmailConfig } from "./utils/ambassadorMailer.js";
 import { getAccountEncryptionStatus } from "./utils/accountCrypto.js";
 import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
 import "./jobs/pushNotifications.js"; // registers push notification reminder/deadline jobs
@@ -45,6 +48,9 @@ app.use(
             "kolekto-fe.vercel.app",
             "https://kolekto.com.ng",
             "kolekto.com.ng",
+            "https://ambassador.kolekto.com",
+            "https://ambassador.kolekto.com.ng",
+            "http://localhost:5175",
         ],
         credentials: true, // Allow credentials (cookies) to be sent
     })
@@ -88,21 +94,15 @@ app.get("/", (req, res) => {
 
 app.use("/api", contributorRouter);
 app.use("/api/auth", authRouter);
-app.use("/api", collectorRouter);
-app.use("/api/dashboard", dashboardRouter);
-app.use("/api/payments", paymentRouter);
-app.use("/api/withdrawals", withdrawalRouter);
-app.use("/api/settings/profile", profileRouter);
-app.use("/api/settings/kyc", kycRouter);
-app.use("/api/settings/security", securityRouter);
 app.use("/api/push", pushRouter);
-app.use("/api/landing-page", landingPageRouter);
+app.use("/api/ambassadors", ambassadorRouter);
 app.use("/api/adminurlabdkole", adminRouter);
 // Same admin prefix — Express composes multiple routers on the same mount.
 // F5: admin reconcile-payment endpoint.
 app.use("/api/adminurlabdkole", adminPaymentsRouter);
 // Payment Monitoring & Recovery Center — dashboard data + retry/resolve/notes.
 app.use("/api/adminurlabdkole", adminPaymentMonitoringRouter);
+app.use("/api/adminurlabdkole", adminAmbassadorsRouter);
 
 const port = process.env.PORT || 5050;
 
@@ -115,6 +115,18 @@ const initializeEmailService = async () => {
         console.log('✅ Email service initialized successfully');
     } else {
         console.warn('⚠️ Email service not configured properly. Check your .env file.');
+    }
+};
+
+// Initialize the dedicated Ambassador Mail Agent — fully independent of the
+// main email service above. A failure here never affects (and is never
+// affected by) the main transactional mailer.
+const initializeAmbassadorEmailService = async () => {
+    const isReady = await verifyAmbassadorEmailConfig();
+    if (isReady) {
+        console.log('✅ Ambassador email service initialized successfully');
+    } else {
+        console.warn('⚠️ Ambassador email service not configured properly. Check AMBASSADOR_SMTP_* env vars.');
     }
 };
 
@@ -238,9 +250,13 @@ app.listen(port, '0.0.0.0', async () => {
     // Initialize email service on startup, but don't block the API in dev
     if (process.env.NODE_ENV === "production") {
         await initializeEmailService();
+        await initializeAmbassadorEmailService();
     } else {
         initializeEmailService().catch((error) => {
             console.warn("Email service check skipped/failed in development:", error?.message || error);
+        });
+        initializeAmbassadorEmailService().catch((error) => {
+            console.warn("Ambassador email service check skipped/failed in development:", error?.message || error);
         });
     }
 });

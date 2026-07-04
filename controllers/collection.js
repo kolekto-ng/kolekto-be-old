@@ -12,32 +12,25 @@ const generateSlug = (title) => {
         .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
 };
 
-// Helper function to ensure unique slug
+// Resolve a unique slug without N+1 serial queries.
+// Fetches all existing slugs that share the same base in one query, then
+// picks the first gap locally — no round-trip per candidate.
 const ensureUniqueSlug = async (baseSlug) => {
-    let slug = baseSlug;
-    let counter = 1;
+    const { data } = await supabase
+        .from('collections')
+        .select('slug')
+        .or(`slug.eq.${baseSlug},slug.like.${baseSlug}-%`)
+        .limit(200);
 
-    while (true) {
-        const { data, error } = await supabase
-            .from('collections')
-            .select('id')
-            .eq('slug', slug)
-            .single();
+    const taken = new Set((data || []).map((r) => r.slug));
+    if (!taken.has(baseSlug)) return baseSlug;
 
-        // If no record found, slug is unique
-        if (error && error.code === 'PGRST116') {
-            return slug;
-        }
-
-        // If record exists, append counter
-        slug = `${baseSlug}-${counter}`;
-        counter++;
-
-        // Safety check to prevent infinite loop
-        if (counter > 1000) {
-            return `${baseSlug}-${Date.now()}`;
-        }
+    for (let i = 1; i <= 200; i++) {
+        const candidate = `${baseSlug}-${i}`;
+        if (!taken.has(candidate)) return candidate;
     }
+    // Absolute last resort — timestamp suffix guarantees uniqueness
+    return `${baseSlug}-${Date.now()}`;
 };
 
 // controllers/collections.js
