@@ -18,6 +18,7 @@ import ambassadorRouter from "./routes/ambassador.js";
 import adminAmbassadorsRouter from "./routes/admin/ambassadors.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
+import { verifyAmbassadorEmailConfig } from "./utils/ambassadorMailer.js";
 import { getAccountEncryptionStatus } from "./utils/accountCrypto.js";
 import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
 // Imported directly so we can mount the webhook route with a RAW body parser
@@ -119,6 +120,18 @@ const initializeEmailService = async () => {
     }
 };
 
+// Initialize the dedicated Ambassador Mail Agent — fully independent of the
+// main email service above. A failure here never affects (and is never
+// affected by) the main transactional mailer.
+const initializeAmbassadorEmailService = async () => {
+    const isReady = await verifyAmbassadorEmailConfig();
+    if (isReady) {
+        console.log('✅ Ambassador email service initialized successfully');
+    } else {
+        console.warn('⚠️ Ambassador email service not configured properly. Check AMBASSADOR_SMTP_* env vars.');
+    }
+};
+
 // Fail loudly in the LOGS (never in the user UI) if bank-account encryption is
 // misconfigured. Bank add + withdrawal both depend on ACCOUNT_ENCRYPTION_KEY;
 // a missing/weak/reformatted key is the single most common cause of the
@@ -155,9 +168,13 @@ app.listen(port, '0.0.0.0', async () => {
     // Initialize email service on startup, but don't block the API in dev
     if (process.env.NODE_ENV === "production") {
         await initializeEmailService();
+        await initializeAmbassadorEmailService();
     } else {
         initializeEmailService().catch((error) => {
             console.warn("Email service check skipped/failed in development:", error?.message || error);
+        });
+        initializeAmbassadorEmailService().catch((error) => {
+            console.warn("Ambassador email service check skipped/failed in development:", error?.message || error);
         });
     }
 });

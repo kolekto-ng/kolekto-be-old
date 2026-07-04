@@ -3,6 +3,7 @@ import multer from 'multer';
 import {
   acceptAmbassadorApplication,
   addAmbassadorApplicationNote,
+  adminLinkOrganizerToAmbassador,
   createAdminAmbassadorResource,
   deleteAdminAmbassadorResource,
   getAdminAmbassadorDetail,
@@ -10,6 +11,8 @@ import {
   getAmbassadorApplication,
   listAdminAmbassadorResources,
   listAmbassadorApplications,
+  listAdminAmbassadorWithdrawals,
+  updateAdminAmbassadorWithdrawal,
   reactivateAmbassador,
   rejectAmbassadorApplication,
   scheduleAmbassadorInterview,
@@ -39,5 +42,12 @@ router.post('/ambassadors/applications/:id/reject', verifyToken, requireAdmin, r
 router.post('/ambassadors/applications/:id/suspend', verifyToken, requireAdmin, suspendAmbassador);
 router.post('/ambassadors/applications/:id/reactivate', verifyToken, requireAdmin, reactivateAmbassador);
 router.post('/ambassadors/applications/:id/notes', verifyToken, requireAdmin, addAmbassadorApplicationNote);
+
+// Ambassador withdrawal management
+router.get('/ambassadors/withdrawals', verifyToken, requireAdmin, listAdminAmbassadorWithdrawals);
+router.patch('/ambassadors/withdrawals/:id', verifyToken, requireAdmin, updateAdminAmbassadorWithdrawal);
+
+// Admin organizer-to-ambassador linking (retroactive referral attribution)
+router.post('/ambassadors/:id/link-organizer', verifyToken, requireAdmin, adminLinkOrganizerToAmbassador);
 
 export default router;

@@ -3,14 +3,25 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import validator from 'validator';
 import { supabase } from '../utils/client.js';
-import { sendEmail } from '../services/emailService.js';
+import { sendAmbassadorEmail } from '../utils/ambassadorEmailer.js';
 import {
   calculateBadges,
   calculateOrganizerReward,
   getAmbassadorRank,
   normalizeApplicationStatus,
+  PROGRESSION_BADGES,
   serializeAmbassadorCode,
 } from '../services/ambassadorProgram.js';
+import { decryptAccountNumber } from '../utils/accountCrypto.js';
+import { applicationReceivedTemplate } from '../templates/ambassador/applicationReceived.js';
+import { interviewScheduledTemplate } from '../templates/ambassador/interviewScheduled.js';
+import { acceptedTemplate } from '../templates/ambassador/accepted.js';
+import { rejectedTemplate } from '../templates/ambassador/rejected.js';
+import { suspendedTemplate } from '../templates/ambassador/suspended.js';
+import { reactivatedTemplate } from '../templates/ambassador/reactivated.js';
+import { withdrawalRequestedTemplate } from '../templates/ambassador/withdrawalRequested.js';
+import { withdrawalApprovedTemplate } from '../templates/ambassador/withdrawalApproved.js';
+import { withdrawalPaidTemplate } from '../templates/ambassador/withdrawalPaid.js';
 
 const SESSION_SECRET =
   process.env.AMBASSADOR_JWT_SECRET ||
@@ -244,52 +255,28 @@ async function ensureAmbassadorProfile(application) {
   return createAmbassadorProfileFromApplication(application);
 }
 
-function ambassadorAcceptanceEmail({ application, profile }) {
-  const portalUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/ambassador/login`;
-  const referralUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/register?ref=${encodeURIComponent(profile.ambassador_code)}`;
-  const name = application.full_name || 'Kolekto Ambassador';
-
-  return {
-    subject: 'Your Kolekto Ambassador account is ready',
-    text:
-      `Hi ${name},\n\n` +
-      `Congratulations. Your Kolekto Ambassador application has been accepted.\n\n` +
-      `Your ambassador code is ${profile.ambassador_code}.\n` +
-      `Use this code with your email to set your PIN and log into the ambassador portal: ${portalUrl}\n\n` +
-      `Your shareable referral link is ${referralUrl}.\n\n` +
-      `Kolekto Team`,
-    html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.6;color:#0f172a">
-        <h2 style="color:#1b5e20">Congratulations, ${name}</h2>
-        <p>Your Kolekto Ambassador application has been accepted.</p>
-        <p style="margin:24px 0;padding:16px;border:1px solid #bbf7d0;background:#f0fdf4;border-radius:10px">
-          <strong>Your ambassador code:</strong><br />
-          <span style="font-size:22px;font-weight:700;color:#166534">${profile.ambassador_code}</span>
-        </p>
-        <p>Use this code with your email to set your PIN and log into the ambassador portal.</p>
-        <p><a href="${portalUrl}" style="display:inline-block;background:#1b5e20;color:white;padding:12px 18px;border-radius:8px;text-decoration:none">Open Ambassador Portal</a></p>
-        <p>Your shareable referral link is <a href="${referralUrl}">${referralUrl}</a>.</p>
-        <p>Organizers you refer can enter this code when creating their Kolekto account so their account is connected to you.</p>
-        <p>Kolekto Team</p>
-      </div>
-    `,
-  };
-}
-
 async function sendAmbassadorAcceptanceEmail(application, profile) {
   if (!application?.email || !profile?.ambassador_code) return;
 
-  const message = ambassadorAcceptanceEmail({ application, profile });
-  const result = await sendEmail({
+  const portalUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/ambassador/login`;
+  const referralUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/register?ref=${encodeURIComponent(profile.ambassador_code)}`;
+  const message = acceptedTemplate({
+    fullName: application.full_name,
+    ambassadorCode: profile.ambassador_code,
+    rank: profile.rank,
+    portalUrl,
+    referralUrl,
+  });
+
+  await sendAmbassadorEmail({
     to: application.email,
     subject: message.subject,
     text: message.text,
     html: message.html,
+    eventType: 'accepted',
+    ambassadorId: profile.id,
+    applicationId: application.id,
   });
-
-  if (!result.success) {
-    console.warn('[ambassador] acceptance email failed:', result.error);
-  }
 }
 
 async function loadProfileById(id) {
@@ -330,27 +317,37 @@ async function getAvailableAmbassadorWithdrawalAmount(profile) {
   return Math.max(0, Number(overview.metrics.availableEarnings || 0) - reserved);
 }
 
+function serializeOrganizerRow(row) {
+  const reward = calculateOrganizerReward(row.processed_amount_internal, row.reward_paid);
+  return {
+    id: row.id,
+    organizerId: row.organizer_id || null,
+    organizerName: row.organizer_name || 'Organizer',
+    organizerEmail: row.organizer_email || null,
+    earningsGenerated: reward.generated,  // always ≥ ₦2,000 (earned from day one)
+    earningsAvailable: reward.available,  // unlocked & not yet paid
+    earningsLocked: reward.locked,        // earned but waiting for ₦500k threshold
+    earningsPaid: Number(row.reward_paid || 0),
+    rewardProgress: reward.maxProgress,
+    unlockProgress: reward.unlockProgress,
+    rewardStatus: reward.status,
+    remainingToUnlock: reward.remainingToUnlock,
+    remainingToMax: reward.remainingToMax,
+    collectionsInfluenced: Number(row.collections_influenced || 0),
+    joinedAt: row.first_influenced_at,
+    lastActivityAt: row.last_activity_at,
+    isActive: row.status === 'active',
+  };
+}
+
 function buildOverview(profile, organizerRows = []) {
-  const organizers = organizerRows.map((row) => {
-    const reward = calculateOrganizerReward(row.processed_amount_internal, row.reward_paid);
-    return {
-      id: row.id,
-      organizerName: row.organizer_name || 'Organizer',
-      earningsGenerated: reward.generated,
-      rewardProgress: reward.maxProgress,
-      unlockProgress: reward.unlockProgress,
-      rewardStatus: reward.status,
-      collectionsInfluenced: row.collections_influenced || 0,
-      lastActivityAt: row.last_activity_at,
-    };
-  });
+  const organizers = organizerRows.map(serializeOrganizerRow);
 
   const totalEarnings = organizers.reduce((sum, row) => sum + row.earningsGenerated, 0);
-  const availableEarnings = organizerRows.reduce((sum, row) => {
-    const reward = calculateOrganizerReward(row.processed_amount_internal, row.reward_paid);
-    return sum + reward.available;
-  }, 0);
-  const totalCollections = organizerRows.reduce((sum, row) => sum + Number(row.collections_influenced || 0), 0);
+  const availableEarnings = organizers.reduce((sum, row) => sum + row.earningsAvailable, 0);
+  // pendingEarnings = sum of locked rewards (earned but waiting for unlock threshold)
+  const pendingEarnings = organizers.reduce((sum, row) => sum + row.earningsLocked, 0);
+  const totalCollections = organizers.reduce((sum, row) => sum + row.collectionsInfluenced, 0);
   const rank = getAmbassadorRank(totalCollections || profile.total_collections_influenced || 0);
 
   return {
@@ -366,13 +363,16 @@ function buildOverview(profile, organizerRows = []) {
       status: profile.status,
       rank,
       activatedAt: profile.activated_at,
+      lastActiveAt: profile.last_active_at,
     },
     metrics: {
-      totalOrganizersInfluenced: organizerRows.length || profile.total_organizers_influenced || 0,
+      totalOrganizersInfluenced: organizers.length || profile.total_organizers_influenced || 0,
       totalCollectionsInfluenced: totalCollections || profile.total_collections_influenced || 0,
       totalEarnings,
-      pendingEarnings: Math.max(0, totalEarnings - availableEarnings),
+      pendingEarnings,
       availableEarnings,
+      // totalWithdrawn is NOT included here — callers that need it fetch
+      // ambassador_withdrawals separately and augment the metrics object.
     },
     organizers,
   };
@@ -403,6 +403,27 @@ function getAmbassadorToken(req) {
   return req.cookies?.ambassador_access_token || null;
 }
 
+// Ambassador access must be denied for any status other than 'accepted', but
+// rejected and suspended ambassadors need distinct, specific copy rather
+// than a generic "access is not active" — this is the single source of
+// truth for that copy, used by every enforcement point (middleware, sign-in,
+// PIN setup) so the message can never drift between them.
+function ambassadorStatusDenialPayload(status) {
+  if (status === 'rejected') {
+    return {
+      error: 'Your ambassador application was not approved. Please contact support if you believe this is an error.',
+      status: 'rejected',
+    };
+  }
+  if (status === 'suspended') {
+    return {
+      error: 'Your ambassador account has been temporarily suspended. Please contact the Kolekto team for assistance.',
+      status: 'suspended',
+    };
+  }
+  return { error: 'Ambassador access is not active', status: status || null };
+}
+
 export async function verifyAmbassador(req, res, next) {
   const token = getAmbassadorToken(req);
   if (!token) return res.status(401).json({ error: 'Ambassador token required' });
@@ -414,8 +435,9 @@ export async function verifyAmbassador(req, res, next) {
     }
 
     const profile = await loadProfileById(decoded.ambassadorId);
-    if (!profile || profile.status !== 'accepted') {
-      return res.status(403).json({ error: 'Ambassador access is not active' });
+    if (!profile) return res.status(403).json(ambassadorStatusDenialPayload(null));
+    if (profile.status !== 'accepted') {
+      return res.status(403).json(ambassadorStatusDenialPayload(profile.status));
     }
 
     req.ambassador = profile;
@@ -452,6 +474,23 @@ export async function submitAmbassadorApplication(req, res) {
       .single();
 
     if (error) throw error;
+
+    (async () => {
+      try {
+        const message = applicationReceivedTemplate({ fullName: data.full_name });
+        await sendAmbassadorEmail({
+          to: data.email,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+          eventType: 'application_received',
+          applicationId: data.id,
+        });
+      } catch (mailErr) {
+        console.error('[ambassador] application received email failed:', mailErr?.message || mailErr);
+      }
+    })();
+
     return res.status(201).json({ message: 'Application submitted successfully', application: data });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to submit ambassador application', details: err.message });
@@ -478,7 +517,7 @@ export async function ambassadorSignIn(req, res) {
 
     if (error) throw error;
     if (!profile) return res.status(401).json({ error: 'Invalid ambassador credentials' });
-    if (profile.status !== 'accepted') return res.status(403).json({ error: 'Ambassador access is not active' });
+    if (profile.status !== 'accepted') return res.status(403).json(ambassadorStatusDenialPayload(profile.status));
     if (!profile.pin_hash) {
       return res.status(409).json({ error: 'Please set your ambassador PIN before signing in', requiresPinSetup: true });
     }
@@ -522,7 +561,7 @@ export async function setupAmbassadorPin(req, res) {
 
     if (error) throw error;
     if (!profile) return res.status(401).json({ error: 'Invalid ambassador credentials' });
-    if (profile.status !== 'accepted') return res.status(403).json({ error: 'Ambassador access is not active' });
+    if (profile.status !== 'accepted') return res.status(403).json(ambassadorStatusDenialPayload(profile.status));
     if (profile.pin_hash) return res.status(409).json({ error: 'A PIN has already been set for this ambassador account' });
 
     const pinHash = await bcrypt.hash(pin, 12);
@@ -557,8 +596,35 @@ export function getAmbassadorMe(req, res) {
 
 export async function getAmbassadorOverview(req, res) {
   try {
-    const organizers = await loadOrganizerRows(req.ambassador.id);
-    return res.json(buildOverview(req.ambassador, organizers));
+    const [organizerRows, withdrawalsRes] = await Promise.all([
+      loadOrganizerRows(req.ambassador.id),
+      supabase
+        .from('ambassador_withdrawals')
+        .select('amount, status')
+        .eq('ambassador_id', req.ambassador.id),
+    ]);
+
+    const overview = buildOverview(req.ambassador, organizerRows);
+    const wRows = withdrawalsRes.data || [];
+
+    const totalWithdrawn = wRows
+      .filter((w) => w.status === 'paid')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    // Subtract in-flight (pending + approved) requests from available so the
+    // dashboard Available figure matches what the ambassador can actually withdraw.
+    const inFlight = wRows
+      .filter((w) => w.status === 'pending' || w.status === 'approved')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    return res.json({
+      ...overview,
+      metrics: {
+        ...overview.metrics,
+        availableEarnings: Math.max(0, (overview.metrics.availableEarnings || 0) - inFlight),
+        totalWithdrawn,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load ambassador overview', details: err.message });
   }
@@ -566,22 +632,40 @@ export async function getAmbassadorOverview(req, res) {
 
 export async function getAmbassadorEarnings(req, res) {
   try {
-    const rows = await loadOrganizerRows(req.ambassador.id);
-    const organizers = rows.map((row) => {
-      const reward = calculateOrganizerReward(row.processed_amount_internal, row.reward_paid);
-      return {
-        id: row.id,
-        organizerName: row.organizer_name || 'Organizer',
-        earningsGenerated: reward.generated,
-        rewardProgress: reward.maxProgress,
-        unlockProgress: reward.unlockProgress,
-        rewardStatus: reward.status,
-        availableEarnings: reward.available,
-        pendingEarnings: reward.pending,
-      };
-    });
+    const [rows, withdrawalsRes] = await Promise.all([
+      loadOrganizerRows(req.ambassador.id),
+      supabase
+        .from('ambassador_withdrawals')
+        .select('amount, status')
+        .eq('ambassador_id', req.ambassador.id),
+    ]);
 
-    return res.json({ organizers });
+    const organizers = rows.map(serializeOrganizerRow);
+    const wRows = withdrawalsRes.data || [];
+
+    const totalEarnings = organizers.reduce((sum, o) => sum + o.earningsGenerated, 0);
+    const rawAvailable = organizers.reduce((sum, o) => sum + o.earningsAvailable, 0);
+    // pendingEarnings = sum of locked amounts (earned but waiting for unlock threshold)
+    const pendingEarnings = organizers.reduce((sum, o) => sum + o.earningsLocked, 0);
+
+    const totalWithdrawn = wRows
+      .filter((w) => w.status === 'paid')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    const inFlight = wRows
+      .filter((w) => w.status === 'pending' || w.status === 'approved')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    return res.json({
+      organizers,
+      summary: {
+        totalEarnings,
+        availableEarnings: Math.max(0, rawAvailable - inFlight),
+        pendingEarnings,
+        totalWithdrawn,
+        totalOrganizers: organizers.length,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load ambassador earnings', details: err.message });
   }
@@ -610,27 +694,77 @@ export async function getAmbassadorBadges(req, res) {
 
 export async function getAmbassadorLeaderboard(req, res) {
   try {
+    // Fetch ALL accepted ambassadors to compute true ranks across the full cohort.
+    // No LIMIT — we need every ambassador's position so the current user's rank
+    // can be returned even when they fall outside the public top-20.
+    //
+    // Sort order (primary → tie-breakers):
+    //   1. total_processed_amount_internal DESC  — highest collection volume
+    //   2. total_organizers_influenced DESC       — most referrals
+    //   3. total_collections_influenced DESC      — badge proxy (more collections = more badges)
+    //   4. activated_at ASC                       — earliest ambassador wins any remaining tie
     const { data, error } = await supabase
       .from('ambassador_profiles')
-      .select('id, full_name, state, school_organization, total_organizers_influenced, total_collections_influenced, total_processed_amount_internal')
+      .select('id, full_name, state, school_organization, total_organizers_influenced, total_collections_influenced, total_processed_amount_internal, activated_at')
       .eq('status', 'accepted')
+      .order('total_processed_amount_internal', { ascending: false })
+      .order('total_organizers_influenced', { ascending: false })
       .order('total_collections_influenced', { ascending: false })
-      .limit(50);
+      .order('activated_at', { ascending: true });
 
     if (error) throw error;
 
-    const leaderboard = (data || []).map((row, index) => ({
-      rank: index + 1,
-      name: row.full_name,
-      state: row.state,
-      campus: row.school_organization,
-      organizersInfluenced: row.total_organizers_influenced || 0,
-      collectionsInfluenced: row.total_collections_influenced || 0,
-      volumeGenerated: Number(row.total_processed_amount_internal || 0),
-      isCurrentAmbassador: row.id === req.ambassador.id,
-    }));
+    const rows = data || [];
 
-    return res.json({ leaderboard });
+    // Assign deterministic dense ranks — ambassadors with identical metrics share a rank.
+    // All four sort columns must match for a tie.
+    const ranked = [];
+    let rank = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const prev = rows[i - 1];
+      const cur = rows[i];
+      const tied =
+        prev &&
+        cur.total_processed_amount_internal === prev.total_processed_amount_internal &&
+        cur.total_organizers_influenced === prev.total_organizers_influenced &&
+        cur.total_collections_influenced === prev.total_collections_influenced &&
+        cur.activated_at === prev.activated_at;
+      if (!tied) rank = i + 1;
+
+      const collectionsCount = cur.total_collections_influenced || 0;
+      const badgeCount = PROGRESSION_BADGES.filter((b) => collectionsCount >= b.requirement).length;
+      const leadershipLevel = getAmbassadorRank(collectionsCount);
+
+      ranked.push({
+        _ambId: cur.id,
+        rank,
+        name: cur.full_name,
+        state: cur.state,
+        campus: cur.school_organization,
+        organizersInfluenced: cur.total_organizers_influenced || 0,
+        badgeCount,
+        leadershipLevel,
+        isCurrentAmbassador: cur.id === req.ambassador.id,
+      });
+    }
+
+    // Top 20 visible on the leaderboard — strip internal _ambId before sending.
+    const leaderboard = ranked.slice(0, 20).map(({ _ambId, ...rest }) => rest);
+
+    // Current user's own rank (may be position 21+ if they're not in the top 20).
+    const myEntry = ranked.find((r) => r._ambId === req.ambassador.id);
+    const myRank = myEntry
+      ? {
+          rank: myEntry.rank,
+          name: myEntry.name,
+          leadershipLevel: myEntry.leadershipLevel,
+          organizersInfluenced: myEntry.organizersInfluenced,
+          badgeCount: myEntry.badgeCount,
+          isInTopTwenty: myEntry.rank <= 20,
+        }
+      : null;
+
+    return res.json({ leaderboard, myRank });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load ambassador leaderboard', details: err.message });
   }
@@ -743,7 +877,7 @@ export async function requestAmbassadorWithdrawal(req, res) {
 
     const { data: payoutAccount, error: accountError } = await supabase
       .from('ambassador_payout_accounts')
-      .select('id, status')
+      .select('id, status, bank_name, account_number_cipher')
       .eq('id', payoutAccountId)
       .eq('ambassador_id', req.ambassador.id)
       .maybeSingle();
@@ -773,6 +907,30 @@ export async function requestAmbassadorWithdrawal(req, res) {
       .single();
 
     if (error) throw error;
+
+    (async () => {
+      try {
+        const message = withdrawalRequestedTemplate({
+          fullName: req.ambassador.full_name,
+          amount: data.amount,
+          bankName: payoutAccount.bank_name,
+          accountNumber: decryptAccountNumber(payoutAccount.account_number_cipher),
+          requestedAt: data.requested_at || data.created_at,
+        });
+        await sendAmbassadorEmail({
+          to: req.ambassador.email,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+          eventType: 'withdrawal_requested',
+          ambassadorId: req.ambassador.id,
+          withdrawalId: data.id,
+        });
+      } catch (mailErr) {
+        console.error('[ambassador] withdrawal requested email failed:', mailErr?.message || mailErr);
+      }
+    })();
+
     return res.status(201).json({
       message: 'Withdrawal request submitted',
       withdrawal: serializeAmbassadorWithdrawal(data),
@@ -961,7 +1119,7 @@ export async function getAdminAmbassadorDetail(req, res) {
         : Promise.resolve({ data: [], error: null }),
       supabase
         .from('ambassador_payout_accounts')
-        .select('id, bank_name, bank_code, account_name, account_last4, is_default, status, created_at')
+        .select('id, bank_name, bank_code, account_name, account_last4, account_number_cipher, is_default, status, created_at')
         .eq('ambassador_id', profile.id)
         .order('created_at', { ascending: false }),
       supabase
@@ -1021,25 +1179,53 @@ export async function getAdminAmbassadorDetail(req, res) {
         collectionsInfluenced: row.collections_influenced || 0,
         rewardStatus: reward.status,
         earningsGenerated: reward.generated,
-        availableEarnings: reward.available,
-        pendingEarnings: reward.pending,
+        earningsAvailable: reward.available,
+        earningsLocked: reward.locked,   // earned but waiting for ₦500k threshold
+        unlockProgress: reward.unlockProgress,
+        remainingToUnlock: reward.remainingToUnlock,
+        rewardProgress: reward.maxProgress,
         connectedAccounts: accountsByOrganizer.get(row.organizer_id) || [],
         withdrawals: withdrawalsByOrganizer.get(row.organizer_id) || [],
         collections: collectionsByOrganizer.get(row.organizer_id) || [],
       };
     });
 
+    const baseOverview = buildOverview(profile, organizerRows);
+    const withdrawalRows = ambassadorWithdrawalsRes.error ? [] : (ambassadorWithdrawalsRes.data || []);
+
+    const totalWithdrawn = withdrawalRows
+      .filter((w) => w.status === 'paid')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    const inFlight = withdrawalRows
+      .filter((w) => w.status === 'pending' || w.status === 'approved')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
     return res.json({
       application,
       profile: {
-        ...buildOverview(profile, organizerRows).profile,
+        ...baseOverview.profile,
         pinSet: Boolean(profile.pin_hash),
         lastLoginAt: profile.last_login_at,
       },
-      metrics: buildOverview(profile, organizerRows).metrics,
+      metrics: {
+        ...baseOverview.metrics,
+        availableEarnings: Math.max(0, (baseOverview.metrics.availableEarnings || 0) - inFlight),
+        totalWithdrawn,
+      },
       organizers,
-      ambassadorPayoutAccounts: ambassadorPayoutAccountsRes.error ? [] : ambassadorPayoutAccountsRes.data || [],
-      ambassadorWithdrawals: ambassadorWithdrawalsRes.error ? [] : ambassadorWithdrawalsRes.data || [],
+      ambassadorPayoutAccounts: ambassadorPayoutAccountsRes.error ? [] : (ambassadorPayoutAccountsRes.data || []).map((acct) => ({
+        id: acct.id,
+        bankName: acct.bank_name,
+        bankCode: acct.bank_code,
+        accountName: acct.account_name,
+        accountLast4: acct.account_last4,
+        accountNumber: decryptAccountNumber(acct.account_number_cipher) || null,
+        isDefault: Boolean(acct.is_default),
+        status: acct.status,
+        createdAt: acct.created_at,
+      })),
+      ambassadorWithdrawals: withdrawalRows,
     });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load ambassador detail', details: err.message });
@@ -1092,13 +1278,42 @@ export async function scheduleAmbassadorInterview(req, res) {
     const interviewDate = cleanString(req.body?.interview_date || req.body?.interviewDate);
     if (!interviewDate) return validationError(res, 'Interview date is required', 'interview_date');
 
+    const interviewTimezone = cleanString(req.body?.interview_timezone || req.body?.timezone) || null;
+    const interviewLocation = cleanString(req.body?.interview_location || req.body?.location || req.body?.meeting_link) || null;
+    const interviewPrepNotes = cleanString(req.body?.interview_prep_notes || req.body?.prep_notes) || null;
+
     const application = await updateApplication(req.params.id, {
       status: 'interview_scheduled',
       interview_date: interviewDate,
+      interview_timezone: interviewTimezone,
+      interview_location: interviewLocation,
+      interview_prep_notes: interviewPrepNotes,
       admin_notes: cleanString(req.body?.notes) || null,
       reviewed_by: req.user?.id || null,
       reviewed_at: new Date().toISOString(),
     });
+
+    (async () => {
+      try {
+        const message = interviewScheduledTemplate({
+          fullName: application.full_name,
+          interviewDate: application.interview_date,
+          timezone: application.interview_timezone,
+          location: application.interview_location,
+          prepNotes: application.interview_prep_notes,
+        });
+        await sendAmbassadorEmail({
+          to: application.email,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+          eventType: 'interview_scheduled',
+          applicationId: application.id,
+        });
+      } catch (mailErr) {
+        console.error('[ambassador] interview scheduled email failed:', mailErr?.message || mailErr);
+      }
+    })();
 
     return res.json({ message: 'Interview scheduled', application });
   } catch (err) {
@@ -1160,6 +1375,34 @@ export async function rejectAmbassadorApplication(req, res) {
       admin_notes: cleanString(req.body?.notes || req.body?.reason) || null,
     });
 
+    // An application can be rejected after an ambassador profile already
+    // exists (e.g. a previously-accepted ambassador is later rejected on
+    // reconsideration) — without this, the profile stays status: 'accepted'
+    // and the ambassador keeps full portal access despite the rejection.
+    const { data: profile } = await supabase
+      .from('ambassador_profiles')
+      .update({ status: 'rejected', updated_at: new Date().toISOString() })
+      .eq('application_id', application.id)
+      .select('id')
+      .maybeSingle();
+
+    (async () => {
+      try {
+        const message = rejectedTemplate({ fullName: application.full_name });
+        await sendAmbassadorEmail({
+          to: application.email,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+          eventType: 'rejected',
+          applicationId: application.id,
+          ambassadorId: profile?.id,
+        });
+      } catch (mailErr) {
+        console.error('[ambassador] rejection email failed:', mailErr?.message || mailErr);
+      }
+    })();
+
     return res.json({ message: 'Application rejected', application });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to reject application', details: err.message });
@@ -1168,17 +1411,37 @@ export async function rejectAmbassadorApplication(req, res) {
 
 export async function suspendAmbassador(req, res) {
   try {
+    const reason = cleanString(req.body?.notes || req.body?.reason) || null;
     const application = await updateApplication(req.params.id, {
       status: 'suspended',
       reviewed_by: req.user?.id || null,
       reviewed_at: new Date().toISOString(),
-      admin_notes: cleanString(req.body?.notes || req.body?.reason) || null,
+      admin_notes: reason,
     });
 
-    await supabase
+    const { data: profile } = await supabase
       .from('ambassador_profiles')
       .update({ status: 'suspended', updated_at: new Date().toISOString() })
-      .eq('application_id', application.id);
+      .eq('application_id', application.id)
+      .select('id')
+      .maybeSingle();
+
+    (async () => {
+      try {
+        const message = suspendedTemplate({ fullName: application.full_name, reason });
+        await sendAmbassadorEmail({
+          to: application.email,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+          eventType: 'suspended',
+          applicationId: application.id,
+          ambassadorId: profile?.id,
+        });
+      } catch (mailErr) {
+        console.error('[ambassador] suspension email failed:', mailErr?.message || mailErr);
+      }
+    })();
 
     return res.json({ message: 'Ambassador suspended', application });
   } catch (err) {
@@ -1203,6 +1466,25 @@ export async function reactivateAmbassador(req, res) {
       .maybeSingle();
 
     if (error) throw error;
+
+    (async () => {
+      try {
+        const portalUrl = `${process.env.FRONTEND_URL || 'https://www.kolekto.com.ng'}/ambassador/login`;
+        const message = reactivatedTemplate({ fullName: application.full_name, portalUrl });
+        await sendAmbassadorEmail({
+          to: application.email,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+          eventType: 'reactivated',
+          applicationId: application.id,
+          ambassadorId: profile?.id,
+        });
+      } catch (mailErr) {
+        console.error('[ambassador] reactivation email failed:', mailErr?.message || mailErr);
+      }
+    })();
+
     return res.json({ message: 'Ambassador reactivated', application, profile });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to reactivate ambassador', details: err.message });
@@ -1227,5 +1509,330 @@ export async function addAmbassadorApplicationNote(req, res) {
     return res.json({ message: 'Note added', application });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to add note', details: err.message });
+  }
+}
+
+// ── Admin Ambassador Withdrawal Management ────────────────────────────────
+
+export async function listAdminAmbassadorWithdrawals(req, res) {
+  try {
+    const status = cleanString(req.query?.status);
+    const VALID_STATUSES = ['pending', 'approved', 'rejected', 'paid'];
+
+    // Step 1: fetch withdrawals + ambassador profile (profile join is fine — no encrypted cols)
+    let query = supabase
+      .from('ambassador_withdrawals')
+      .select(`
+        id, ambassador_id, payout_account_id, amount, status,
+        admin_notes, requested_at, processed_at, created_at,
+        ambassador_profiles!ambassador_id (
+          id, full_name, email, ambassador_code,
+          total_earnings, pending_earnings, available_earnings
+        )
+      `)
+      .order('created_at', { ascending: false });
+
+    if (status && VALID_STATUSES.includes(status)) {
+      query = query.eq('status', status);
+    }
+
+    const { data: rows, error } = await query;
+    if (error) throw error;
+
+    // Step 2: fetch payout accounts in a separate direct query so account_number_cipher
+    // is reliably returned. PostgREST embedded joins can silently drop encrypted columns
+    // depending on role-level grants; a direct .select() on the service-role client never has
+    // this problem.
+    const payoutIds = [...new Set((rows || []).map((r) => r.payout_account_id).filter(Boolean))];
+    const accountMap = new Map();
+    if (payoutIds.length) {
+      const { data: accounts, error: acctErr } = await supabase
+        .from('ambassador_payout_accounts')
+        .select('id, bank_name, bank_code, account_name, account_last4, account_number_cipher')
+        .in('id', payoutIds);
+      if (acctErr) throw acctErr;
+      for (const acct of accounts || []) {
+        const plainNumber = decryptAccountNumber(acct.account_number_cipher);
+        accountMap.set(acct.id, {
+          bank_name: acct.bank_name,
+          bank_code: acct.bank_code,
+          account_name: acct.account_name,
+          account_last4: acct.account_last4,
+          // full decrypted number for admin — falls back to last4 display in the UI if null
+          account_number: plainNumber || null,
+        });
+      }
+    }
+
+    const withdrawals = (rows || []).map((row) => ({
+      ...row,
+      ambassador_payout_accounts: accountMap.get(row.payout_account_id) || null,
+    }));
+
+    return res.json({ withdrawals });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to list ambassador withdrawals', details: err.message });
+  }
+}
+
+export async function adminLinkOrganizerToAmbassador(req, res) {
+  try {
+    const ambassadorId = cleanString(req.params.id);
+    const organizerEmail = normalizeEmail(req.body?.organizer_email || req.body?.email || '');
+    const organizerId = cleanString(req.body?.organizer_id || '');
+
+    if (!organizerEmail && !organizerId) {
+      return validationError(res, 'Provide organizer_email or organizer_id', 'organizer');
+    }
+
+    // Resolve ambassador profile
+    const { data: ambassador, error: ambErr } = await supabase
+      .from('ambassador_profiles')
+      .select('id, full_name, ambassador_code, status')
+      .eq('id', ambassadorId)
+      .maybeSingle();
+    if (ambErr) throw ambErr;
+    if (!ambassador) return res.status(404).json({ error: 'Ambassador not found' });
+    if (ambassador.status !== 'accepted') {
+      return res.status(400).json({ error: 'Ambassador is not active (status must be accepted)' });
+    }
+
+    // Resolve organizer profile
+    let orgQuery = supabase
+      .from('profiles')
+      .select('id, full_name, email, referred_by_ambassador_id');
+    if (organizerId) {
+      orgQuery = orgQuery.eq('id', organizerId);
+    } else {
+      orgQuery = orgQuery.ilike('email', organizerEmail);
+    }
+    const { data: organizer, error: orgErr } = await orgQuery.maybeSingle();
+    if (orgErr) throw orgErr;
+    if (!organizer) return res.status(404).json({ error: 'Organizer profile not found' });
+
+    // Guard: don't overwrite a different ambassador's referral
+    if (organizer.referred_by_ambassador_id && organizer.referred_by_ambassador_id !== ambassadorId) {
+      return res.status(409).json({ error: 'Organizer is already referred by a different ambassador' });
+    }
+
+    // Guard: don't allow an ambassador to link themselves
+    const { data: ambProfile } = await supabase
+      .from('ambassador_profiles')
+      .select('id')
+      .eq('id', ambassadorId)
+      .eq('id', organizer.id)   // same user
+      .maybeSingle();
+    if (ambProfile) return res.status(400).json({ error: 'An ambassador cannot be linked to themselves' });
+
+    // Check for existing aio row
+    const { data: existingAio, error: aioLookupErr } = await supabase
+      .from('ambassador_influenced_organizers')
+      .select('id, ambassador_id')
+      .eq('organizer_id', organizer.id)
+      .maybeSingle();
+    if (aioLookupErr) throw aioLookupErr;
+
+    if (existingAio && existingAio.ambassador_id !== ambassadorId) {
+      return res.status(409).json({ error: 'Organizer is already linked to a different ambassador in the influence table' });
+    }
+
+    if (!existingAio) {
+      const { error: insertErr } = await supabase
+        .from('ambassador_influenced_organizers')
+        .insert([{
+          ambassador_id: ambassadorId,
+          organizer_id: organizer.id,
+          organizer_name: organizer.full_name,
+          organizer_email: organizer.email,
+          status: 'active',
+        }]);
+      if (insertErr) throw insertErr;
+    }
+
+    // Set profiles.referred_by_ambassador_id (may fail silently if already set correctly)
+    const { error: profileErr } = await supabase
+      .from('profiles')
+      .update({
+        referred_by_ambassador_id: ambassadorId,
+        ambassador_referral_code: ambassador.ambassador_code,
+      })
+      .eq('id', organizer.id);
+    if (profileErr) console.warn('[adminLinkOrganizer] profile update warning:', profileErr.message);
+
+    // Backfill processed_amount_internal + largest_collection_amount_internal + collections_influenced
+    // from all historical paid contributions for this organizer
+    const { error: backfillErr } = await supabase.rpc('backfill_single_organizer_attribution', {
+      p_organizer_id: organizer.id,
+    });
+    if (backfillErr) console.warn('[adminLinkOrganizer] backfill warning:', backfillErr.message);
+
+    // Re-sync ambassador profile counters
+    const { error: syncErr } = await supabase.rpc('sync_ambassador_profile_counters', {
+      p_ambassador_id: ambassadorId,
+    });
+    if (syncErr) throw syncErr;
+
+    // Return fresh ambassador overview
+    const { data: freshProfile } = await supabase
+      .from('ambassador_profiles')
+      .select('total_earnings, available_earnings, pending_earnings, total_organizers_influenced, total_collections_influenced')
+      .eq('id', ambassadorId)
+      .maybeSingle();
+
+    return res.json({
+      message: `${organizer.full_name} has been linked to ambassador ${ambassador.full_name}`,
+      organizer: { id: organizer.id, name: organizer.full_name, email: organizer.email },
+      ambassador: { id: ambassador.id, name: ambassador.full_name, code: ambassador.ambassador_code },
+      updatedMetrics: freshProfile || null,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to link organizer to ambassador', details: err.message });
+  }
+}
+
+async function loadWithdrawalEmailContext(withdrawal) {
+  const [{ data: profile }, { data: payoutAccount }] = await Promise.all([
+    supabase
+      .from('ambassador_profiles')
+      .select('id, full_name, email')
+      .eq('id', withdrawal.ambassador_id)
+      .maybeSingle(),
+    withdrawal.payout_account_id
+      ? supabase
+          .from('ambassador_payout_accounts')
+          .select('bank_name, account_number_cipher')
+          .eq('id', withdrawal.payout_account_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+  ]);
+
+  return {
+    profile,
+    bankName: payoutAccount?.bank_name || null,
+    accountNumber: payoutAccount ? decryptAccountNumber(payoutAccount.account_number_cipher) : null,
+  };
+}
+
+export async function updateAdminAmbassadorWithdrawal(req, res) {
+  try {
+    const withdrawalId = cleanString(req.params.id);
+    const action = cleanString(req.body?.action || req.body?.status);
+    const adminNotes = cleanString(req.body?.notes || req.body?.admin_notes);
+
+    if (!withdrawalId) return validationError(res, 'Withdrawal ID is required', 'id');
+
+    const VALID_ACTIONS = ['approve', 'reject', 'pay'];
+    if (!VALID_ACTIONS.includes(action)) {
+      return res.status(400).json({ error: `Action must be one of: ${VALID_ACTIONS.join(', ')}` });
+    }
+
+    // Load the withdrawal to validate current state
+    const { data: withdrawal, error: loadError } = await supabase
+      .from('ambassador_withdrawals')
+      .select('id, ambassador_id, payout_account_id, amount, status')
+      .eq('id', withdrawalId)
+      .maybeSingle();
+
+    if (loadError) throw loadError;
+    if (!withdrawal) return res.status(404).json({ error: 'Withdrawal not found' });
+
+    // Validate state transitions
+    if (action === 'approve' && withdrawal.status !== 'pending') {
+      return res.status(409).json({ error: `Cannot approve a withdrawal with status '${withdrawal.status}'` });
+    }
+    if (action === 'reject' && !['pending', 'approved'].includes(withdrawal.status)) {
+      return res.status(409).json({ error: `Cannot reject a withdrawal with status '${withdrawal.status}'` });
+    }
+    if (action === 'pay' && withdrawal.status !== 'approved') {
+      return res.status(409).json({ error: `Cannot pay a withdrawal with status '${withdrawal.status}'. Approve it first.` });
+    }
+
+    if (action === 'pay') {
+      // Atomic: distribute reward_paid across organizers and mark withdrawal as paid
+      const { error: rpcError } = await supabase.rpc('distribute_ambassador_withdrawal_payment', {
+        p_withdrawal_id: withdrawalId,
+      });
+      if (rpcError) throw rpcError;
+
+      const { data: updated } = await supabase
+        .from('ambassador_withdrawals')
+        .select('*')
+        .eq('id', withdrawalId)
+        .maybeSingle();
+
+      (async () => {
+        try {
+          const { profile, bankName, accountNumber } = await loadWithdrawalEmailContext(updated);
+          if (!profile?.email) return;
+          const message = withdrawalPaidTemplate({
+            fullName: profile.full_name,
+            amount: updated.amount,
+            bankName,
+            accountNumber,
+            paidAt: updated.processed_at || updated.updated_at,
+          });
+          await sendAmbassadorEmail({
+            to: profile.email,
+            subject: message.subject,
+            text: message.text,
+            html: message.html,
+            eventType: 'withdrawal_paid',
+            ambassadorId: profile.id,
+            withdrawalId: updated.id,
+          });
+        } catch (mailErr) {
+          console.error('[ambassador] withdrawal paid email failed:', mailErr?.message || mailErr);
+        }
+      })();
+
+      return res.json({ message: 'Withdrawal marked as paid and reward_paid distributed', withdrawal: updated });
+    }
+
+    // approve or reject — simple status update
+    const newStatus = action === 'approve' ? 'approved' : 'rejected';
+    const { data: updated, error: updateError } = await supabase
+      .from('ambassador_withdrawals')
+      .update({
+        status: newStatus,
+        admin_notes: adminNotes || null,
+        processed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', withdrawalId)
+      .select('*')
+      .single();
+
+    if (updateError) throw updateError;
+
+    if (newStatus === 'approved') {
+      (async () => {
+        try {
+          const { profile, bankName, accountNumber } = await loadWithdrawalEmailContext(updated);
+          if (!profile?.email) return;
+          const message = withdrawalApprovedTemplate({
+            fullName: profile.full_name,
+            amount: updated.amount,
+            bankName,
+            accountNumber,
+            referenceId: updated.id,
+          });
+          await sendAmbassadorEmail({
+            to: profile.email,
+            subject: message.subject,
+            text: message.text,
+            html: message.html,
+            eventType: 'withdrawal_approved',
+            ambassadorId: profile.id,
+            withdrawalId: updated.id,
+          });
+        } catch (mailErr) {
+          console.error('[ambassador] withdrawal approved email failed:', mailErr?.message || mailErr);
+        }
+      })();
+    }
+
+    return res.json({ message: `Withdrawal ${newStatus}`, withdrawal: updated });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update ambassador withdrawal', details: err.message });
   }
 }

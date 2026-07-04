@@ -9,7 +9,7 @@ export const AMBASSADOR_APPLICATION_STATUSES = [
 export const REWARD_RULES = {
   unlockAmount: 500000,
   unlockReward: 2000,
-  incrementalAmount: 100000,
+  incrementalAmount: 50000,
   incrementalReward: 100,
   maxRewardPerOrganizer: 5000,
 };
@@ -46,8 +46,13 @@ export function calculateOrganizerReward(processedAmount = 0, paidAmount = 0) {
   const paid = Math.max(0, Number(paidAmount || 0));
   const unlockProgress = Math.min(100, Math.round((amount / REWARD_RULES.unlockAmount) * 100));
 
-  let generated = 0;
-  let locked = REWARD_RULES.unlockReward;
+  // The ₦2,000 base reward is earned the moment an organizer is referred — it
+  // appears in Total Earnings immediately. It stays locked (unavailable) until
+  // the organizer's collections cross the ₦500,000 threshold. After that,
+  // incremental ₦100 rewards are added for every additional ₦50k collected,
+  // up to the ₦5,000 per-organizer cap.
+  let generated = REWARD_RULES.unlockReward; // ₦2,000 always
+  let locked = REWARD_RULES.unlockReward;    // ₦2,000 locked until unlock threshold
 
   if (amount >= REWARD_RULES.unlockAmount) {
     const increments = Math.floor((amount - REWARD_RULES.unlockAmount) / REWARD_RULES.incrementalAmount);
@@ -55,18 +60,22 @@ export function calculateOrganizerReward(processedAmount = 0, paidAmount = 0) {
       REWARD_RULES.maxRewardPerOrganizer,
       REWARD_RULES.unlockReward + increments * REWARD_RULES.incrementalReward
     );
-    locked = 0;
+    locked = 0; // fully unlocked — base + incremental are all available
   }
 
-  const available = Math.max(0, generated - paid);
+  // available = earned & unlocked, minus what has already been paid out
+  const available = Math.max(0, generated - locked - paid);
   const remainingToMax = Math.max(0, REWARD_RULES.maxRewardPerOrganizer - generated);
+  const remainingToUnlock = amount >= REWARD_RULES.unlockAmount ? 0 : Math.max(0, REWARD_RULES.unlockAmount - amount);
 
   return {
-    generated,
+    generated,  // always ≥ ₦2,000 — reflects total rewards earned (locked or not)
     paid,
-    available,
-    locked,
-    pending: locked + remainingToMax,
+    available,  // unlocked & not yet paid out
+    locked,     // earned but waiting for organizer to cross ₦500k
+    pending: locked, // alias used by dashboard — only the locked portion
+    remainingToUnlock,
+    remainingToMax,
     unlockProgress,
     maxProgress: Math.round((generated / REWARD_RULES.maxRewardPerOrganizer) * 100),
     status: generated >= REWARD_RULES.maxRewardPerOrganizer ? 'maxed' : amount >= REWARD_RULES.unlockAmount ? 'earning' : 'locked',
