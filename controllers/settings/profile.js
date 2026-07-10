@@ -165,6 +165,19 @@ export const saveAccount = async (req, res) => {
 
 
     try {
+        // 0️⃣ KYC gate — bank accounts can only be linked once identity is verified.
+        const { data: kyc, error: kycErr } = await supabase
+            .from("kyc_verifications")
+            .select("status")
+            .eq("user_id", user_id)
+            .maybeSingle();
+        if (kycErr) throw kycErr;
+        if (kyc?.status !== "verified") {
+            return res.status(403).json({
+                error: "Complete your KYC verification before adding a bank account",
+            });
+        }
+
         // 1️⃣ Fetch user profile
         const { data: profile, error: profileErr } = await supabase
             .from("profiles")
@@ -178,7 +191,6 @@ export const saveAccount = async (req, res) => {
                 error: "Add your full name to your profile before linking a bank account",
             });
         }
-        // i need to end this function if the user is yet to verify their identity
 
         // 2️⃣ Verify account with provider. Paystack network/5xx errors are
         // surfaced as 502 so the frontend can prompt the user to retry rather

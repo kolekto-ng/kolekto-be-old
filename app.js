@@ -4,6 +4,8 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRouter from "./routes/auth.js";
 import collectorRouter from "./routes/collection.js";
+import collectionTransferRouter from "./routes/collectionTransfer.js";
+import collectionAccessRouter from "./routes/collectionAccess.js";
 import dashboardRouter from "./routes/dashboard.js";
 import paymentRouter from "./routes/payment.js";
 import contributorRouter from "./routes/contribution.js";
@@ -88,6 +90,8 @@ app.get("/", (req, res) => {
 app.use("/api", contributorRouter);
 app.use("/api/auth", authRouter);
 app.use("/api", collectorRouter);
+app.use("/api", collectionTransferRouter);
+app.use("/api", collectionAccessRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/payments", paymentRouter);
 app.use("/api/withdrawals", withdrawalRouter);

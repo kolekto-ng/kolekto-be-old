@@ -109,6 +109,33 @@ export const createCollection = async (req, res) => {
     const user_id = req.user.id;
 
     // ------------------------
+    // 1b. KYC gate — unverified users may create only one collection.
+    // ------------------------
+    const { data: kyc, error: kycError } = await supabase
+        .from("kyc_verifications")
+        .select("status")
+        .eq("user_id", user_id)
+        .maybeSingle();
+    if (kycError) {
+        return res.status(500).json({ message: kycError.message });
+    }
+    if (kyc?.status !== "verified") {
+        const { count, error: countError } = await supabase
+            .from("collections")
+            .select("id", { count: "exact", head: true })
+            .eq("user_id", user_id)
+            .neq("status", "deleted");
+        if (countError) {
+            return res.status(500).json({ message: countError.message });
+        }
+        if ((count ?? 0) >= 1) {
+            return res.status(403).json({
+                message: "Complete KYC verification to create more than one collection.",
+            });
+        }
+    }
+
+    // ------------------------
     // 2. Determine collection type
     // ------------------------
 

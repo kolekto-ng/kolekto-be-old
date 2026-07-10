@@ -89,10 +89,15 @@ export const uploadDocument = async (req, res, next) => {
         }
 
         // 1️⃣ Create parent verification request (kyc_documents)
+        // kyc_verification_id links this row to kyc_verifications so the admin
+        // panel's embedded query (kyc_verifications -> kyc_documents) can find
+        // it — without it, the document is saved but invisible to admins,
+        // since PostgREST's embed only matches rows via that FK.
         const { data: docRow, error: docError } = await supabase
             .from("kyc_documents")
             .insert([{
                 user_id: userId,
+                kyc_verification_id: kycVerificationId,
                 document_type: documentType,
                 verification_type: verificationType,
                 status: "pending"
