@@ -41,11 +41,18 @@ const PAYSTACK_BASE_URL = "https://api.paystack.co";
  *   produce a collectionId. Supplied by an admin via Admin Reconcile after
  *   confirming, out-of-band, which collection a stranded payment belongs to.
  * @param {string|null} [overrideSelectedTierId] - Manual recovery hint for
- *   `tiered` collections. The edge function auto-infers the tier from the
- *   verified Paystack amount when this is omitted; only needed when two or
- *   more tiers share the same price (amount inference is then ambiguous).
+ *   `tiered` collections, for the rarer case where amount-based tier
+ *   inference is ambiguous. The admin panel's Reconcile form has always
+ *   collected this (see ReconcilePaymentPage.tsx) but it was silently
+ *   dropped here — never read off req.body, never forwarded. Fixed
+ *   alongside the invocationSource addition below since both touch this
+ *   same call site.
+ * @param {string|null} [invocationSource] - 'webhook' | 'admin_reconcile' |
+ *   'scheduled_recovery' | 'frontend_callback'. Optional — the edge function
+ *   infers a sensible default from the request shape if omitted, so existing
+ *   callers that don't pass this keep working identically.
  */
-export async function invokeVerifyEdgeFunction(reference, overrideCollectionId = null, overrideSelectedTierId = null) {
+export async function invokeVerifyEdgeFunction(reference, overrideCollectionId = null, overrideSelectedTierId = null, invocationSource = null) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey =
         process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -69,11 +76,12 @@ export async function invokeVerifyEdgeFunction(reference, overrideCollectionId =
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 25000);
 
-    try {
-        const body = { reference };
-        if (overrideCollectionId) body.overrideCollectionId = overrideCollectionId;
-        if (overrideSelectedTierId) body.overrideSelectedTierId = overrideSelectedTierId;
+    const body = { reference };
+    if (overrideCollectionId) body.overrideCollectionId = overrideCollectionId;
+    if (overrideSelectedTierId) body.overrideSelectedTierId = overrideSelectedTierId;
+    if (invocationSource) body.invocationSource = invocationSource;
 
+    try {
         const res = await axios.post(
             url,
             body,
@@ -1339,7 +1347,7 @@ export const handleWebhook = async (req, res) => {
             console.log(
                 `[webhook ref=${reference}] WEBHOOK_INVOKED_VERIFY — no contributions or deposits row exists; recovering via edge function`
             );
-            const invokeResult = await invokeVerifyEdgeFunction(reference);
+            const invokeResult = await invokeVerifyEdgeFunction(reference, null, null, "webhook");
             if (invokeResult.ok) {
                 console.log(
                     `[webhook ref=${reference}] WEBHOOK_VERIFY_RECOVERED status=${invokeResult.status}`

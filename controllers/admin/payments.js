@@ -33,10 +33,11 @@ export const reconcilePayment = async (req, res) => {
     // timestamp) and pastes its ID here.
     const collectionId = String(req.body?.collectionId || "").trim() || null;
 
-    // Manual tier recovery hint for `tiered` collections — only needed when
-    // the edge function's amount-based tier inference is ambiguous (two or
-    // more tiers share the same price). Tier ids are organizer-defined
-    // (often a timestamp-like string, not a UUID), so no UUID format check.
+    // Manual tier override — the admin Reconcile form (ReconcilePaymentPage.tsx)
+    // has always collected this ("Pricing tier ID" field) but it was never
+    // read here, so it silently never reached the edge function. Fixed:
+    // tier ids are organizer-defined (often timestamp-like), not UUIDs, so
+    // no format check beyond basic sanitization.
     const selectedTierId = String(req.body?.selectedTierId || "").trim() || null;
 
     if (!reference) {
@@ -71,7 +72,7 @@ export const reconcilePayment = async (req, res) => {
             (selectedTierId ? ` selectedTierIdOverride=${selectedTierId}` : "")
     );
 
-    const result = await invokeVerifyEdgeFunction(reference, collectionId, selectedTierId);
+    const result = await invokeVerifyEdgeFunction(reference, collectionId, selectedTierId, "admin_reconcile");
 
     if (result.ok) {
         console.log(

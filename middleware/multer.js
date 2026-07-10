@@ -5,8 +5,8 @@ import fs from "fs";
 // Ensure upload directory exists on startup
 const uploadDir = "./uploads/temp/";
 if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-  console.log(`Created upload directory: ${uploadDir}`);
+    fs.mkdirSync(uploadDir, { recursive: true });
+    console.log(`Created upload directory: ${uploadDir}`);
 }
 
 // Configure storage

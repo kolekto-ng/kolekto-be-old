@@ -9,7 +9,8 @@
     "audit:payout-accounts": "node scripts/auditPayoutAccounts.js",
     "encryption:generate-key": "node scripts/generateEncryptionKey.js",
     "encryption:reencrypt": "node scripts/reencryptPayoutAccounts.js",
-    "backfill:unique-codes": "node scripts/backfillUniqueContributionCodes.js"
+    "backfill:unique-codes": "node scripts/backfillUniqueContributionCodes.js",
+    "test:ambassador-email": "node scripts/test-ambassador-email.js"
   },
   "dependencies": {
     "@google-cloud/recaptcha-enterprise": "^6.3.0",
