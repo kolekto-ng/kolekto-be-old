@@ -1,3 +1,22 @@
+-- ⚠️ SUPERSEDED / NOW REDUNDANT (kept only for migration-history continuity).
+--
+-- The merge-tag columns this file adds have been FOLDED INTO the single
+-- complete view definition in database/email_recipient_directory.sql. That
+-- file is now self-sufficient — applying it alone produces the full view.
+--
+-- Root cause this split caused: the base file (email_recipient_directory.sql)
+-- had a corrupted `create or replace view` header, and this follow-up was the
+-- ONLY place the merge columns were defined. When the base file failed to parse
+-- or this follow-up was never applied, the deployed view lacked every merge
+-- column, so utils/mergeDataResolver.js read `undefined` for
+-- first_name/referral_code/earnings/etc. and those tags rendered empty — even
+-- though the engine and all render paths were correct. Do NOT re-split.
+--
+-- Re-running this file is a harmless no-op: it is a `create or replace view`
+-- with the identical column set to email_recipient_directory.sql.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- (Original note preserved below.)
 -- Extends email_recipient_directory (database/email_recipient_directory.sql)
 -- with the fields needed for merge-tag personalization. Apply after that
 -- file. Postgres requires CREATE OR REPLACE VIEW to keep existing columns

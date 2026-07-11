@@ -73,6 +73,46 @@ function buildSystemMergeData() {
   };
 }
 
+// Opt-in diagnostic logging for the personalization pipeline. OFF by default
+// (verbose logs must never run in normal production). Set EMAIL_MERGE_DEBUG=true
+// to log, per resolved recipient: which directory row was found and which
+// catalog tags resolved to a real value vs. empty. This is the fastest way to
+// catch a recurrence of the view/resolver column-drift that broke merge tags —
+// a missing view column shows up here as that tag being "empty" for EVERY
+// recipient, immediately pointing at the DB view rather than the engine.
+const MERGE_DEBUG = process.env.EMAIL_MERGE_DEBUG === 'true';
+
+// The keys that come from the recipient directory row (i.e. real per-person
+// data, as opposed to system keys like current_date/unsubscribe_link). Used
+// only by the debug logger to report which data-backed tags failed to resolve.
+const DIRECTORY_BACKED_KEYS = [
+  'first_name', 'last_name', 'full_name', 'email', 'phone', 'registration_date',
+  'referral_code', 'available_earnings', 'pending_earnings', 'total_earnings',
+  'badge', 'collections_created', 'total_amount_processed',
+  'collection_title', 'collection_target_amount', 'collection_amount_raised',
+];
+
+function debugLogResolvedMergeData(context, identifier, directoryRowFound, resolved) {
+  if (!MERGE_DEBUG) return;
+  const resolvedKeys = [];
+  const emptyKeys = [];
+  for (const key of DIRECTORY_BACKED_KEYS) {
+    const v = resolved[key];
+    if (v !== undefined && v !== null && String(v).trim() !== '') resolvedKeys.push(key);
+    else emptyKeys.push(key);
+  }
+  log.info('merge-tags.debug_resolved', {
+    context,
+    identifier,
+    directoryRowFound,
+    resolvedKeys,
+    emptyKeys,
+    // If EVERY directory-backed key is empty but a row WAS found, the DB view
+    // is almost certainly missing columns (the classic drift) — call it out.
+    likelyViewColumnDrift: directoryRowFound && resolvedKeys.length <= 2,
+  });
+}
+
 /** Maps one email_recipient_directory row to the flat merge-tag key space. */
 function mapDirectoryRowToMergeData(row) {
   return {
@@ -125,12 +165,14 @@ export async function buildMergeDataMapForRecipients(recipients) {
   for (const recipient of recipients) {
     const directoryRow = recipient.user_id ? directoryById.get(recipient.user_id) : null;
     const base = directoryRow ? mapDirectoryRowToMergeData(directoryRow) : { email: recipient.email };
-    map.set(recipient.id, {
+    const resolved = {
       ...system,
       ...base,
       email: base.email || recipient.email,
       unsubscribe_link: buildUnsubscribeLink(recipient.email, recipient.campaign_id),
-    });
+    };
+    debugLogResolvedMergeData('bulk', recipient.email, Boolean(directoryRow), resolved);
+    map.set(recipient.id, resolved);
   }
   return map;
 }
@@ -154,12 +196,14 @@ export async function buildMergeDataForEmail(email, campaignId) {
   }
 
   const base = data ? mapDirectoryRowToMergeData(data) : { email };
-  return {
+  const resolved = {
     ...system,
     ...base,
     email: base.email || email,
     unsubscribe_link: buildUnsubscribeLink(email, campaignId),
   };
+  debugLogResolvedMergeData('single', email, Boolean(data), resolved);
+  return resolved;
 }
 
 /**
