@@ -20,15 +20,30 @@ import adminPaymentMonitoringRouter from "./routes/admin/paymentMonitoring.js";
 import pushRouter from "./routes/push.js";
 import ambassadorRouter from "./routes/ambassador.js";
 import adminAmbassadorsRouter from "./routes/admin/ambassadors.js";
+import adminEmailCampaignsRouter from "./routes/admin/emailCampaigns.js";
+import emailPublicRouter from "./routes/emailPublic.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
 import { verifyAmbassadorEmailConfig } from "./utils/ambassadorMailer.js";
+import { verifyMarketingEmailConfig } from "./utils/marketingMailer.js";
 import { getAccountEncryptionStatus } from "./utils/accountCrypto.js";
 import "./jobs/paymentSettlement.js"; // registers T+1 settlement cron (5am WAT daily)
 import "./jobs/pushNotifications.js"; // registers push notification reminder/deadline jobs
+import "./jobs/emailCampaignQueue.js"; // registers email campaign send-queue worker (leader-gated)
+import "./jobs/emailCampaignScheduler.js"; // registers scheduled-campaign promotion worker (leader-gated)
 // Imported directly so we can mount the webhook route with a RAW body parser
 // before the global JSON parser. See B-1 below.
 import { handleWebhook } from "./controllers/deposit.js";
+import { installProcessGuards } from "./utils/processGuards.js";
+import requestContext from "./middleware/requestContext.js";
+import { notFound, errorHandler } from "./middleware/errorHandler.js";
+
+// Install process-level crash guards BEFORE anything else can throw. On Node 22
+// an unhandled rejection would otherwise terminate the process by default —
+// this turns that invisible full outage into a loud, correlated log line while
+// keeping the API up. See utils/processGuards.js.
+installProcessGuards();
+
 const app = express();
 app.use(helmet());
 
@@ -59,6 +74,12 @@ app.use(
         credentials: true, // Allow credentials (cookies) to be sent
     })
 );
+
+// Assign a correlation id + per-request structured logging to EVERYTHING that
+// follows (including the raw-body webhook mounted just below, ahead of the JSON
+// parser). Provides req.id, req.log, the X-Request-Id response header, and a
+// one-line-per-request access log with latency. See middleware/requestContext.js.
+app.use(requestContext);
 
 
 
@@ -116,6 +137,20 @@ app.use("/api/adminurlabdkole", adminPaymentsRouter);
 // Payment Monitoring & Recovery Center — dashboard data + retry/resolve/notes.
 app.use("/api/adminurlabdkole", adminPaymentMonitoringRouter);
 app.use("/api/adminurlabdkole", adminAmbassadorsRouter);
+// Email Campaign & Communications Center — same admin prefix convention.
+app.use("/api/adminurlabdkole", adminEmailCampaignsRouter);
+// Public email endpoints (unsubscribe) — deliberately NOT under the admin
+// prefix. Recipients click this link from inside an email; they have no
+// admin session and shouldn't need the obscured admin path.
+app.use("/api/email", emailPublicRouter);
+
+// ── Tail middleware — MUST be after every router ─────────────────────────────
+// notFound: any unmatched route → structured JSON 404 (was previously an
+// unlogged Express default). errorHandler: the 4-arg net that catches every
+// rejected async route handler (Express 5 forwards them here), logs it once
+// with the request's correlation id + stack, and returns { error, requestId }.
+app.use(notFound);
+app.use(errorHandler);
 
 const port = process.env.PORT || 5050;
 
@@ -140,6 +175,19 @@ const initializeAmbassadorEmailService = async () => {
         console.log('✅ Ambassador email service initialized successfully');
     } else {
         console.warn('⚠️ Ambassador email service not configured properly. Check AMBASSADOR_SMTP_* env vars.');
+    }
+};
+
+// Initialize the dedicated Marketing Mail Agent (Email Campaigns) — fully
+// independent of both the main transactional mailer and the Ambassador
+// mailer above. A failure here never affects (and is never affected by)
+// either of those.
+const initializeMarketingEmailService = async () => {
+    const isReady = await verifyMarketingEmailConfig();
+    if (isReady) {
+        console.log('✅ Marketing email service initialized successfully');
+    } else {
+        console.warn('⚠️ Marketing email service not configured properly. Check MARKETING_SMTP_* env vars.');
     }
 };
 
@@ -264,12 +312,16 @@ app.listen(port, '0.0.0.0', async () => {
     if (process.env.NODE_ENV === "production") {
         await initializeEmailService();
         await initializeAmbassadorEmailService();
+        await initializeMarketingEmailService();
     } else {
         initializeEmailService().catch((error) => {
             console.warn("Email service check skipped/failed in development:", error?.message || error);
         });
         initializeAmbassadorEmailService().catch((error) => {
             console.warn("Ambassador email service check skipped/failed in development:", error?.message || error);
+        });
+        initializeMarketingEmailService().catch((error) => {
+            console.warn("Marketing email service check skipped/failed in development:", error?.message || error);
         });
     }
 });
