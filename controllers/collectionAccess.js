@@ -113,12 +113,28 @@ export const requestCollectionAccess = async (req, res) => {
       10
     );
 
-    await sendEmail({
+    // sendEmail returns { success: false } on failure instead of throwing —
+    // without this check the invite is created and we reply 200, but the
+    // owner never receives the code and is stranded on the OTP screen. Clean
+    // up the invite so a retry starts fresh.
+    const emailResult = await sendEmail({
       to: ownerEmail,
       subject: "Your Kolekto access grant code",
       html,
       text: `Your Kolekto access grant code is ${otp}. It expires in 10 minutes.`,
     });
+
+    if (!emailResult?.success) {
+      console.error("requestCollectionAccess email delivery failed:", emailResult?.error);
+      await supabase
+        .from("collection_access_invites")
+        .update({ status: "cancelled", used_at: new Date().toISOString() })
+        .eq("id", invite.id)
+        .eq("status", "pending");
+      return res.status(502).json({
+        error: "We couldn't send the verification code to your email. Please try again in a moment.",
+      });
+    }
 
     return res.status(200).json({ success: true, inviteId: invite.id, email: ownerEmail, recipientEmail });
   } catch (err) {
@@ -191,12 +207,22 @@ export const verifyCollectionAccessOtp = async (req, res) => {
       "Review Access Invite"
     );
 
-    await sendEmail({
+    // This step exists to deliver the accept link to the recipient — if the
+    // email fails, the owner must know it didn't send. The row stays
+    // pending+verified so re-entering the still-valid OTP re-sends the link.
+    const emailResult = await sendEmail({
       to: record.to_email,
       subject: "You've been given access to a Kolekto collection",
       html,
       text: `Review your access invite: ${respondUrl} (expires in 7 days)`,
     });
+
+    if (!emailResult?.success) {
+      console.error("verifyCollectionAccessOtp email delivery failed:", emailResult?.error);
+      return res.status(502).json({
+        error: "We couldn't email the invite to the recipient. Please try again in a moment.",
+      });
+    }
 
     return res.status(200).json({ success: true, recipientEmail: record.to_email });
   } catch (err) {

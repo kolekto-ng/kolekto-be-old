@@ -79,20 +79,24 @@ export const requestCollectionTransfer = async (req, res) => {
     const otp = randomOtp6();
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    const { error: insertErr } = await supabase.from("collection_transfer_requests").insert([
-      {
-        collection_id: collectionId,
-        from_user_id: userId,
-        to_email: recipientEmail,
-        to_user_id: recipient.id,
-        otp_hash: otpHash(userId, otp),
-        otp_expires_at: otpExpiresAt.toISOString(),
-      },
-    ]);
+    const { data: inserted, error: insertErr } = await supabase
+      .from("collection_transfer_requests")
+      .insert([
+        {
+          collection_id: collectionId,
+          from_user_id: userId,
+          to_email: recipientEmail,
+          to_user_id: recipient.id,
+          otp_hash: otpHash(userId, otp),
+          otp_expires_at: otpExpiresAt.toISOString(),
+        },
+      ])
+      .select("id")
+      .single();
 
-    if (insertErr) {
+    if (insertErr || !inserted) {
       console.error("collection_transfer_requests insert error:", insertErr);
-      return res.status(500).json({ error: "Failed to create transfer request", details: insertErr.message });
+      return res.status(500).json({ error: "Failed to create transfer request", details: insertErr?.message });
     }
 
     const html = otpCodeTemplate(
@@ -103,12 +107,29 @@ export const requestCollectionTransfer = async (req, res) => {
       10
     );
 
-    await sendEmail({
+    // sendEmail never throws — it returns { success: false } on delivery
+    // failure. If we don't check it, the request row is created and we reply
+    // 200, the owner is told "code sent", but no email ever arrives and they
+    // are stranded on the OTP screen with no way to know why. Surface the
+    // failure and cancel the just-created row so a retry starts clean.
+    const emailResult = await sendEmail({
       to: ownerEmail,
       subject: "Your Kolekto collection transfer code",
       html,
       text: `Your Kolekto collection transfer code is ${otp}. It expires in 10 minutes.`,
     });
+
+    if (!emailResult?.success) {
+      console.error("requestCollectionTransfer email delivery failed:", emailResult?.error);
+      await supabase
+        .from("collection_transfer_requests")
+        .update({ status: "cancelled", used_at: new Date().toISOString() })
+        .eq("id", inserted.id)
+        .eq("status", "pending");
+      return res.status(502).json({
+        error: "We couldn't send the verification code to your email. Please try again in a moment.",
+      });
+    }
 
     return res.status(200).json({ success: true, email: ownerEmail, recipientEmail });
   } catch (err) {
@@ -188,12 +209,23 @@ export const verifyCollectionTransferOtp = async (req, res) => {
       "Review Transfer"
     );
 
-    await sendEmail({
+    // The whole point of this step is to deliver the accept/decline link to
+    // the recipient. If that email fails, the owner must know it didn't go
+    // out (rather than seeing "invite sent"). The row stays pending+verified,
+    // so re-entering the still-valid OTP re-sends the link.
+    const emailResult = await sendEmail({
       to: record.to_email,
       subject: "You've been offered a Kolekto collection",
       html,
       text: `Review a collection transfer offer: ${respondUrl} (expires in 7 days)`,
     });
+
+    if (!emailResult?.success) {
+      console.error("verifyCollectionTransferOtp email delivery failed:", emailResult?.error);
+      return res.status(502).json({
+        error: "We couldn't email the invite to the recipient. Please try again in a moment.",
+      });
+    }
 
     return res.status(200).json({ success: true, recipientEmail: record.to_email });
   } catch (err) {

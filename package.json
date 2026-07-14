@@ -10,7 +10,8 @@
     "encryption:generate-key": "node scripts/generateEncryptionKey.js",
     "encryption:reencrypt": "node scripts/reencryptPayoutAccounts.js",
     "backfill:unique-codes": "node scripts/backfillUniqueContributionCodes.js",
-    "test:ambassador-email": "node scripts/test-ambassador-email.js"
+    "test:ambassador-email": "node scripts/test-ambassador-email.js",
+    "test:marketing-email": "node scripts/test-marketing-email.js"
   },
   "dependencies": {
     "@google-cloud/recaptcha-enterprise": "^6.3.0",
@@ -25,6 +26,7 @@
     "fs": "^0.0.1-security",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "juice": "^11.1.1",
     "mongoose": "^8.14.1",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",

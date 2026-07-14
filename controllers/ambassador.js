@@ -202,18 +202,39 @@ function validateApplication(payload, res) {
 }
 
 async function getNextAmbassadorCode(fullName = '') {
-  for (let offset = 0; offset < 800; offset += 1) {
+  // Generate the deterministic candidate codes for this name up front, then
+  // resolve which are already taken in a SINGLE query.
+  //
+  // Previously this probed the DB once per offset — up to 800 sequential
+  // round-trips on the admin accept path (a latency cliff, and 800 serial
+  // Supabase calls under contention). serializeAmbassadorCode can repeat a
+  // code across different offsets, so we dedupe while preserving offset order
+  // to keep the exact same selection priority as before.
+  const MAX_ATTEMPTS = 800;
+  const candidates = [];
+  const seen = new Set();
+  for (let offset = 0; offset < MAX_ATTEMPTS; offset += 1) {
     const code = serializeAmbassadorCode(offset, fullName);
-    const { data, error: lookupError } = await supabase
-      .from('ambassador_profiles')
-      .select('id')
-      .eq('ambassador_code', code)
-      .maybeSingle();
-
-    if (lookupError) throw lookupError;
-    if (!data) return code;
+    if (!seen.has(code)) {
+      seen.add(code);
+      candidates.push(code);
+    }
   }
 
+  const { data, error } = await supabase
+    .from('ambassador_profiles')
+    .select('ambassador_code')
+    .in('ambassador_code', candidates);
+  if (error) throw error;
+
+  const taken = new Set((data || []).map((r) => r.ambassador_code));
+  const free = candidates.find((code) => !taken.has(code));
+  if (free) return free;
+
+  // Note: like the original, this relies on the ambassador_code UNIQUE
+  // constraint to be the final arbiter under a concurrent-accept race — two
+  // simultaneous accepts could both pick the same free code, and the second
+  // INSERT will fail the unique constraint rather than duplicate.
   throw new Error('Unable to generate a unique ambassador code');
 }
 
