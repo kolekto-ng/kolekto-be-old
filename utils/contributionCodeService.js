@@ -23,8 +23,27 @@ import { supabase } from "./client.js";
  *
  * Returns null when no code should be assigned (no prefix configured to
  * build a code from, collection-level or on the specific unit/tier).
+ *
+ * `contributionId` (optional): when passed, this is checked FIRST — if that
+ * contribution already has a `contributor_unique_code`, it's returned as-is
+ * and the counter is never touched. This is what makes repeat calls safe:
+ * verifyPayment can be hit again (page refresh, polling, retry, a webhook
+ * redelivery, whatever) for a payment that's already been assigned a code,
+ * and it will just get the same code back instead of burning a fresh number
+ * from the shared per-(collection, prefix) counter every time.
  */
-export async function resolveContributionUniqueCode({ collectionId, collection, unitPrefix }) {
+export async function resolveContributionUniqueCode({ collectionId, collection, unitPrefix, contributionId }) {
+    if (contributionId) {
+        const { data: existing } = await supabase
+            .from("contributions")
+            .select("contributor_unique_code")
+            .eq("id", contributionId)
+            .maybeSingle();
+        if (existing?.contributor_unique_code) {
+            return existing.contributor_unique_code;
+        }
+    }
+
     // Strip internal whitespace too — organizers sometimes type a tier
     // prefix like "VIP 1" (label-style) rather than a code-style "VIP1".
     // This never touches the stored prefix value, only the code built

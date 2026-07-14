@@ -77,7 +77,6 @@ export const requestCollectionTransfer = async (req, res) => {
       .eq("status", "pending");
 
     const otp = randomOtp6();
-    console.log("[TEMP DEBUG OTP] collection transfer OTP:", otp); // TODO: remove after testing
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     const { error: insertErr } = await supabase.from("collection_transfer_requests").insert([

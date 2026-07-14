@@ -75,7 +75,6 @@ export const requestCollectionAccess = async (req, res) => {
       .eq("status", "pending");
 
     const otp = randomOtp6();
-    console.log("[TEMP DEBUG OTP] collection access OTP:", otp); // TODO: remove after testing
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     const { data: invite, error: insertErr } = await supabase

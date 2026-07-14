@@ -161,7 +161,7 @@ const verifyAccountEncryptionConfig = () => {
         console.warn(
             "⚠️ ACCOUNT_ENCRYPTION_KEY had surrounding quotes/whitespace; it has " +
             "been sanitised at runtime. Older ciphertext is still recovered via " +
-            "fallback keys, but consider cleaning the env var so the raw value matches."
+            "fallback key. s, but consider cleaning the env var so the raw value matches."
         );
     }
     if (status.weak) {
