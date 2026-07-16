@@ -914,6 +914,7 @@ export const verifyPayment = async (req, res) => {
             const uniqueCode = await resolveContributionUniqueCode({
                 collectionId: deposit.collection_id,
                 collection,
+                contributionId: deposit.contributor_id,
             });
             if (uniqueCode) {
                 await supabase
@@ -1411,6 +1412,7 @@ export const handleWebhook = async (req, res) => {
             const uniqueCode = await resolveContributionUniqueCode({
                 collectionId: deposit.collection_id,
                 collection,
+                contributionId: deposit.contributor_id,
             });
             if (uniqueCode) {
                 await supabase

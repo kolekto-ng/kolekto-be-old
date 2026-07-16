@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node --test \"tests/**/*.test.js\"",
+    "test": "node --test \"tests/*.test.js\"",
+    "test:integration": "node --test \"tests/integration/**/*.test.js\"",
     "start:dev": "nodemon app.js",
     "start": "node app.js",
     "audit:payout-accounts": "node scripts/auditPayoutAccounts.js",

@@ -39,7 +39,6 @@ export const requestPasswordChangeOtp = async (req, res) => {
     }
 
     const otp = randomOtp6();
-    console.log("[TEMP DEBUG OTP] password change OTP:", otp); // TODO: remove after testing
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Invalidate any previous unused OTPs for this user (defensive).
@@ -287,7 +286,6 @@ export const requestEmailChangeOtp = async (req, res) => {
     }
 
     const otp = randomOtp6();
-    console.log("[TEMP DEBUG OTP] email change OTP:", otp); // TODO: remove after testing
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Invalidate any previous unused requests for this user.
