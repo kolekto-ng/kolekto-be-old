@@ -22,12 +22,18 @@ export const createCollection = async (req, res) => {
         const collection = await collectionService.create({
             userId: req.user?.id,
             input: req.body,
+            requestId: req.id, // correlation id from requestContext middleware
         });
-        return res.status(200).json({ data: collection });
+        return res.status(200).json({ data: collection, requestId: req.id });
     } catch (err) {
+        // The service already emitted a structured, correlated log line; here we
+        // only shape the HTTP response and echo the correlation id so a user can
+        // quote it in a bug report.
         const status = err.statusCode || 500;
-        if (status >= 500) console.error("Error creating collection:", err);
-        return res.status(status).json({ error: err.message || "Internal server error" });
+        return res.status(status).json({
+            error: err.message || "Internal server error",
+            requestId: req.id,
+        });
     }
 };
 

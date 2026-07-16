@@ -7,14 +7,20 @@
 // row, and fundraising campaign/docs/images) — reproduced under the Express
 // runtime so the API becomes the single write authority (Phase 1, Wave 1).
 //
+// Observability (Wave 1.2): every create emits correlated, structured log
+// events (collection.create.started/succeeded/rejected/failed) carrying the
+// request's correlation id, and thrown errors are tagged with `requestId` so a
+// failure can be traced frontend -> controller -> service -> DB. The repository
+// is kept intentionally pure (no logging) per the layering standard; the service
+// logs around repo calls. See ../../kolekto-fe-old/KOLEKTO_ENGINEERING_STANDARDS.md.
+//
 // Deliberate parity note: this service does NOT populate `wallets.fee_breakdown`.
 // Only the now-removed legacy Express controller ever wrote it; the live Edge
 // path never did, so wizard-created collections already surface an empty
 // `amountBreakdown`. Reproducing that keeps a future FE flip a behavioral no-op.
 // (Open question tracked in KOLEKTO_PHASE1_ENGINEERING_AUDIT.md §1.)
-//
-// See ../../kolekto-fe-old/KOLEKTO_ENGINEERING_STANDARDS.md §2–3.
 import { collectionRepository } from "../repositories/collectionRepository.js";
+import { log } from "../utils/logger.js";
 
 /** Build a URL slug the same way the live Edge function does: base + random suffix. */
 function defaultGenerateSlug(title) {
@@ -59,14 +65,20 @@ function httpError(message, statusCode) {
   return err;
 }
 
+/** Milliseconds elapsed since an hrtime.bigint() mark, rounded to 0.1ms. */
+function durationMsSince(startedAt) {
+  return Math.round(Number(process.hrtime.bigint() - startedAt) / 1e5) / 10;
+}
+
 /**
  * Factory so callers (and tests) can inject a repository, slug generator, and
- * logger. Production wiring uses the real Supabase-backed repository.
+ * logger. Production wiring uses the real Supabase-backed repository and the
+ * structured JSON logger.
  */
 export function makeCollectionService({
   repo = collectionRepository,
   generateSlug = defaultGenerateSlug,
-  logger = console,
+  logger = log,
 } = {}) {
   /** KYC gate: unverified users may own at most one non-deleted collection. */
   async function assertCanCreate(userId) {
@@ -83,7 +95,7 @@ export function makeCollectionService({
   }
 
   /** Create the fundraising campaign + its documents/images (best-effort). */
-  async function createCampaignArtifacts(collection, input) {
+  async function createCampaignArtifacts(collection, input, requestId) {
     const {
       title,
       campaign_summary,
@@ -135,7 +147,11 @@ export function makeCollectionService({
     // insert failed — mirrors the live Edge behavior.
     const campaignId = campaign?.id || collection.id;
     if (campError) {
-      logger.error("Campaign insert error:", campError.message);
+      logger.error("collection.campaign.insert_failed", {
+        requestId,
+        collectionId: collection.id,
+        reason: campError.message,
+      });
     }
 
     if (Array.isArray(verification_documents) && verification_documents.length > 0) {
@@ -148,7 +164,13 @@ export function makeCollectionService({
         return { campaign_id: campaignId, document_url: docUrl, document_name: docName };
       });
       const { error: docErr } = await repo.insertVerificationDocuments(docs);
-      if (docErr) logger.error("Verification docs insert error:", docErr.message);
+      if (docErr) {
+        logger.error("collection.campaign.docs_failed", {
+          requestId,
+          collectionId: collection.id,
+          reason: docErr.message,
+        });
+      }
     }
 
     if (Array.isArray(story_images) && story_images.length > 0) {
@@ -159,115 +181,156 @@ export function makeCollectionService({
         display_order: idx,
       }));
       const { error: imgErr } = await repo.insertCampaignImages(images);
-      if (imgErr) logger.error("Campaign images insert error:", imgErr.message);
+      if (imgErr) {
+        logger.error("collection.campaign.images_failed", {
+          requestId,
+          collectionId: collection.id,
+          reason: imgErr.message,
+        });
+      }
     }
   }
 
   /**
    * Create a collection.
-   * @param {{ userId: string, input: object }} args
+   * @param {{ userId: string, input: object, requestId?: string }} args
    * @returns {Promise<object>} the created collection row.
    */
-  async function create({ userId, input }) {
-    if (!userId) throw httpError("Unauthorized", 401);
-    if (!input?.title?.trim()) throw httpError("Title is required", 400);
+  async function create({ userId, input, requestId } = {}) {
+    const startedAt = process.hrtime.bigint();
+    const collectionType = input?.collection_type ?? "fixed";
 
-    await assertCanCreate(userId);
-
-    const {
-      collection_type = "fixed",
-      title,
-      description,
-      amount,
-      deadline,
-      contributions_fields,
-      price_tiers,
-      max_contributions,
-      fee_bearer = "contributor",
-      code_prefix,
-      unique_id_enabled = false,
-      target_amount,
-      min_contribution = 0,
-      event_date,
-      ticket_mode,
-      allow_multiple_quantity = true,
-      is_open_ended = false,
-      auto_close = false,
-      story,
-      campaign_category,
-      campaign_keywords,
-      campaign_country = "Nigeria",
-      social_links,
-      support_phone,
-      campaign_summary,
-      story_images = [],
-      banner_url = null,
-    } = input;
-
-    const status = collection_type === "fundraising" ? "pending_review" : "active";
-    const legacyType = resolveLegacyType(collection_type, ticket_mode);
-
-    let collection;
     try {
-      collection = await repo.insertCollection({
-        user_id: userId,
-        title: title.trim(),
-        description: description?.trim() || null,
-        amount: amount ?? 0,
-        deadline: deadline || null,
-        contributions_fields: contributions_fields || [],
-        price_tiers: price_tiers || [],
-        max_contributions: max_contributions || null,
-        fee_bearer,
-        code_prefix: code_prefix || null,
-        unique_id_enabled,
-        target_amount: target_amount || null,
-        min_contribution: min_contribution || 0,
-        collection_type,
-        type: legacyType,
-        event_date: event_date || null,
-        ticket_mode: ticket_mode || null,
-        allow_multiple_quantity,
-        is_open_ended,
-        auto_close,
-        story: story || null,
-        campaign_category: campaign_category || null,
-        campaign_keywords: campaign_keywords || null,
-        campaign_country,
-        social_links: social_links || [],
-        support_phone_number: support_phone || null,
-        campaign_summary: campaign_summary || null,
-        story_images,
-        banner_url: banner_url || null,
-        status,
+      if (!userId) throw httpError("Unauthorized", 401);
+      if (!input?.title?.trim()) throw httpError("Title is required", 400);
+
+      await assertCanCreate(userId);
+
+      const {
+        title,
+        description,
+        amount,
+        deadline,
+        contributions_fields,
+        price_tiers,
+        max_contributions,
+        fee_bearer = "contributor",
+        code_prefix,
+        unique_id_enabled = false,
+        target_amount,
+        min_contribution = 0,
+        event_date,
+        ticket_mode,
+        allow_multiple_quantity = true,
+        is_open_ended = false,
+        auto_close = false,
+        story,
+        campaign_category,
+        campaign_keywords,
+        campaign_country = "Nigeria",
+        social_links,
+        support_phone,
+        campaign_summary,
+        story_images = [],
+        banner_url = null,
+      } = input;
+
+      const status = collectionType === "fundraising" ? "pending_review" : "active";
+      const legacyType = resolveLegacyType(collectionType, ticket_mode);
+
+      let collection;
+      try {
+        collection = await repo.insertCollection({
+          user_id: userId,
+          title: title.trim(),
+          description: description?.trim() || null,
+          amount: amount ?? 0,
+          deadline: deadline || null,
+          contributions_fields: contributions_fields || [],
+          price_tiers: price_tiers || [],
+          max_contributions: max_contributions || null,
+          fee_bearer,
+          code_prefix: code_prefix || null,
+          unique_id_enabled,
+          target_amount: target_amount || null,
+          min_contribution: min_contribution || 0,
+          collection_type: collectionType,
+          type: legacyType,
+          event_date: event_date || null,
+          ticket_mode: ticket_mode || null,
+          allow_multiple_quantity,
+          is_open_ended,
+          auto_close,
+          story: story || null,
+          campaign_category: campaign_category || null,
+          campaign_keywords: campaign_keywords || null,
+          campaign_country,
+          social_links: social_links || [],
+          support_phone_number: support_phone || null,
+          campaign_summary: campaign_summary || null,
+          story_images,
+          banner_url: banner_url || null,
+          status,
+          currency: "NGN",
+          currency_symbol: "₦",
+          slug: generateSlug(title),
+        });
+      } catch (err) {
+        // Live Edge returns 400 with the DB message on insert failure.
+        throw httpError(err.message || "Failed to create collection", err.statusCode || 400);
+      }
+
+      // Wallet creation is best-effort (a warning must not fail the request).
+      const { error: walletError } = await repo.createWalletIfAbsent({
+        collection_id: collection.id,
+        available_balance: 0,
+        ledger_balance: 0,
+        gross_payment: 0,
+        net_payment: 0,
+        withdrawn: 0,
+        pending_balance: 0,
         currency: "NGN",
         currency_symbol: "₦",
-        slug: generateSlug(title),
       });
+      if (walletError) {
+        logger.warn("collection.create.wallet_warning", {
+          requestId,
+          collectionId: collection.id,
+          reason: walletError.message,
+        });
+      }
+
+      if (collectionType === "fundraising") {
+        await createCampaignArtifacts(collection, input, requestId);
+      }
+
+      logger.info("collection.create.succeeded", {
+        requestId,
+        userId,
+        collectionId: collection.id,
+        collectionType,
+        duration_ms: durationMsSince(startedAt),
+      });
+      return collection;
     } catch (err) {
-      // Live Edge returns 400 with the DB message on insert failure.
-      throw httpError(err.message || "Failed to create collection", err.statusCode || 400);
+      if (requestId && !err.requestId) err.requestId = requestId;
+      const status = err.statusCode || 500;
+      const meta = {
+        requestId,
+        userId,
+        collectionType,
+        status,
+        duration_ms: durationMsSince(startedAt),
+      };
+      if (status >= 500) {
+        logger.error("collection.create.failed", { ...meta, err });
+      } else {
+        // Expected business rejections (401/400/403) — warn with the reason,
+        // not a stack, to keep the signal clean.
+        logger.warn("collection.create.rejected", { ...meta, reason: err.message });
+      }
+      throw err;
     }
-
-    // Wallet creation is best-effort (a warning must not fail the request).
-    const { error: walletError } = await repo.createWalletIfAbsent({
-      collection_id: collection.id,
-      available_balance: 0,
-      ledger_balance: 0,
-      gross_payment: 0,
-      net_payment: 0,
-      withdrawn: 0,
-      pending_balance: 0,
-      currency: "NGN",
-      currency_symbol: "₦",
-    });
-    if (walletError) logger.warn("Wallet creation warning:", walletError.message);
-
-    if (collection_type === "fundraising") {
-      await createCampaignArtifacts(collection, input);
-    }
-
-    return collection;
   }
 
   return { create };

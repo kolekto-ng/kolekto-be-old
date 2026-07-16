@@ -13,7 +13,22 @@ import {
   resolveLegacyType,
 } from "../services/collectionService.js";
 
-const silentLogger = { warn() {}, error() {}, log() {} };
+const silentLogger = { debug() {}, info() {}, warn() {}, error() {}, log() {} };
+
+/** A logger that records every structured event for assertions. */
+function makeSpyLogger() {
+  const events = [];
+  const record = (level) => (event, meta = {}) => events.push({ level, event, meta });
+  return {
+    events,
+    debug: record("debug"),
+    info: record("info"),
+    warn: record("warn"),
+    error: record("error"),
+    log: record("log"),
+    find: (event) => events.find((e) => e.event === event),
+  };
+}
 
 function makeFakeRepo(overrides = {}) {
   const calls = {
@@ -59,12 +74,12 @@ function makeFakeRepo(overrides = {}) {
   return { repo, calls };
 }
 
-function makeService(overrides) {
+function makeService(overrides, logger = silentLogger) {
   const { repo, calls } = makeFakeRepo(overrides);
   const service = makeCollectionService({
     repo,
     generateSlug: () => "my-title-abcde",
-    logger: silentLogger,
+    logger,
   });
   return { service, calls };
 }
@@ -209,4 +224,90 @@ test("non-fundraising collection does not touch campaign tables", async () => {
   assert.equal(calls.insertCampaign.length, 0);
   assert.equal(calls.insertVerificationDocuments.length, 0);
   assert.equal(calls.insertCampaignImages.length, 0);
+});
+
+// ── Wave 1.2: correlation, structured logging, edge cases ────────────────────
+
+test("thrown errors are tagged with the requestId for tracing", async () => {
+  const { service } = makeService({ kycStatus: "pending", collectionCount: 1 });
+  await assert.rejects(
+    () => service.create({ userId: "u1", input: baseInput, requestId: "req-123" }),
+    (e) => e.statusCode === 403 && e.requestId === "req-123"
+  );
+});
+
+test("a successful create emits a correlated collection.create.succeeded event", async () => {
+  const spy = makeSpyLogger();
+  const { service } = makeService({}, spy);
+  const col = await service.create({ userId: "u1", input: baseInput, requestId: "req-abc" });
+  const ok = spy.find("collection.create.succeeded");
+  assert.ok(ok, "expected a succeeded event");
+  assert.equal(ok.meta.requestId, "req-abc");
+  assert.equal(ok.meta.collectionId, col.id);
+  assert.equal(typeof ok.meta.duration_ms, "number");
+});
+
+test("a business rejection is logged as warn collection.create.rejected (no stack)", async () => {
+  const spy = makeSpyLogger();
+  const { service } = makeService({ kycStatus: "pending", collectionCount: 1 }, spy);
+  await assert.rejects(() =>
+    service.create({ userId: "u1", input: baseInput, requestId: "req-x" })
+  );
+  const rej = spy.find("collection.create.rejected");
+  assert.ok(rej);
+  assert.equal(rej.level, "warn");
+  assert.equal(rej.meta.status, 403);
+  assert.equal(rej.meta.err, undefined); // no error object/stack on expected rejections
+});
+
+test("an unexpected repo failure is logged as error collection.create.failed (500)", async () => {
+  const spy = makeSpyLogger();
+  // getKycStatus throws a non-http error → should surface as 500 and be tagged.
+  const { repo } = makeFakeRepo();
+  repo.getKycStatus = async () => {
+    throw new Error("supabase down");
+  };
+  const service = makeCollectionService({ repo, generateSlug: () => "s", logger: spy });
+  await assert.rejects(
+    () => service.create({ userId: "u1", input: baseInput, requestId: "req-500" }),
+    (e) => (e.statusCode || 500) === 500 && e.requestId === "req-500"
+  );
+  const failed = spy.find("collection.create.failed");
+  assert.ok(failed);
+  assert.equal(failed.level, "error");
+  assert.equal(failed.meta.err.message, "supabase down");
+});
+
+test("unexpected/empty payload is rejected as 400 (title required)", async () => {
+  const { service, calls } = makeService();
+  await assert.rejects(
+    () => service.create({ userId: "u1", input: {} }),
+    (e) => e.statusCode === 400
+  );
+  assert.equal(calls.insertCollection.length, 0);
+});
+
+test("legacy string verification documents get default names", async () => {
+  const { service, calls } = makeService();
+  await service.create({
+    userId: "u1",
+    input: {
+      title: "Legacy Docs",
+      collection_type: "fundraising",
+      amount: 1000,
+      verification_documents: ["https://doc/legacy.pdf"],
+    },
+  });
+  const doc = calls.insertVerificationDocuments[0][0];
+  assert.equal(doc.document_url, "https://doc/legacy.pdf");
+  assert.equal(doc.document_name, "Verification Document 1");
+});
+
+test("a campaign insert failure does not fail the overall create (best-effort)", async () => {
+  const { service } = makeService({ campaignError: { message: "campaign boom" } });
+  const col = await service.create({
+    userId: "u1",
+    input: { title: "Resilient", collection_type: "fundraising", amount: 1000 },
+  });
+  assert.equal(col.id, "col-1");
 });
