@@ -16,6 +16,7 @@ import {
     deriveNetContribution,
 } from "../utils/financial.js";
 import { resolveContributionUniqueCode, shouldGenerateUniqueCode } from "../utils/contributionCodeService.js";
+import { normalizePhone } from "../utils/normalizePhone.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
@@ -470,7 +471,9 @@ export const initializePayment = async (req, res) => {
                     collection_id: collectionId,
                     name: fullName,
                     email,
-                    phone: phoneNumber,
+                    // Normalize to guarantee contributions.phone (varchar(20)) can
+                    // never overflow — see utils/normalizePhone.js.
+                    phone: normalizePhone(phoneNumber),
                     amount: netAmount,  // ALWAYS the net contribution (Total Raised tracks this)
                     contributor_information: Object.keys(infoEntry).length ? [infoEntry] : [],
                     status: "pending",
