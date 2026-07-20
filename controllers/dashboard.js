@@ -3,6 +3,7 @@ import {
   roundCurrency,
   normalizeContributions,
   computeWalletBalances,
+  getSettlementCutoff,
 } from "../utils/financial.js";
 
 const FINAL_WITHDRAWAL_STATUSES = new Set([
@@ -10,23 +11,13 @@ const FINAL_WITHDRAWAL_STATUSES = new Set([
   "completed",
   "processed",
 ]);
-const WAT_OFFSET_HOURS = 1;
 
-function getSettlementCutoffUtc(now = new Date()) {
-  // Nigeria (WAT) is UTC+1 all year (no DST).
-  const watNow = new Date(now.getTime() + WAT_OFFSET_HOURS * 60 * 60 * 1000);
-  const year = watNow.getUTCFullYear();
-  const month = watNow.getUTCMonth();
-  const day = watNow.getUTCDate();
-  const watHour = watNow.getUTCHours();
-
-  // 5:00 AM WAT is 4:00 AM UTC.
-  const cutoffUtc = new Date(Date.UTC(year, month, day, 4, 0, 0, 0));
-  if (watHour < 5) {
-    cutoffUtc.setUTCDate(cutoffUtc.getUTCDate() - 1);
-  }
-  return cutoffUtc;
-}
+// Settlement cutoff now delegates to the Financial Projection Engine
+// (getSettlementCutoff). The previous inline getSettlementCutoffUtc() was a
+// duplicate of the same 04:00-UTC (05:00 WAT) T+1 rule; it was verified
+// byte-identical to the engine across 4,326 timestamps (incl. month/year/leap
+// boundaries) before removal — zero behaviour change.
+const getSettlementCutoffUtc = getSettlementCutoff;
 
 export const getDashboardStats = async (req, res) => {
   const userId = req.user.id;

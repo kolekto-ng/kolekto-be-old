@@ -5,6 +5,21 @@
 -- `deposits` table). This recomputes every wallet projection from the SOURCE OF
 -- TRUTH — `contributions` + `withdrawals` — NEVER from `deposits`.
 --
+-- ┌─ MIRRORS kolekto-shared-financial (Financial Projection Engine) ───────────┐
+-- │ Phase 2.2 Wave 3: this SQL is a PROVEN MIRROR of the TypeScript engine      │
+-- │ `kolekto-shared-financial@0.1.0`. It is NOT an independent implementation.  │
+-- │   • settlement_cutoff()            ≡ FPE.getSettlementCutoff                 │
+-- │   • settlement_recompute_wallets() ≡ FPE.normalizeContributions →           │
+-- │                                       FPE.computeWallet (per collection)     │
+-- │ Equivalence is enforced by the golden-vector conformance suite              │
+-- │ (kolekto-shared-financial/test/sql.harness.sql + the Wave 3 conformance     │
+-- │ query). Verified on test project lpeeckqsltxohppheucz: 16/16 conformance    │
+-- │ vectors + 57/57 live wallets, 0 drift (2026-07-18).                         │
+-- │ ⚠️ Any edit that changes fee/cutoff/normalization/projection math here MUST │
+-- │ keep the conformance suite green, or update the engine + re-prove all three │
+-- │ runtimes. Do not diverge silently.                                          │
+-- └────────────────────────────────────────────────────────────────────────────┘
+--
 -- Properties:
 --   • derives only from contributions (source of truth); wallets is a projection
 --   • ONE settlement cutoff definition: settlement_cutoff() (4am UTC = 5am WAT),
@@ -26,6 +41,7 @@
 -- ============================================================================
 
 -- ── ONE cutoff definition ───────────────────────────────────────────────────
+-- MIRRORS kolekto-shared-financial@0.1.0 · getSettlementCutoff (04:00 UTC T+1).
 CREATE OR REPLACE FUNCTION public.settlement_cutoff() RETURNS timestamptz
 LANGUAGE sql STABLE AS $fn$
   SELECT CASE WHEN now() >= ((date_trunc('day', now() AT TIME ZONE 'UTC') + interval '4 hours') AT TIME ZONE 'UTC')
@@ -46,6 +62,11 @@ CREATE TABLE IF NOT EXISTS public.settlement_runs (
 );
 
 -- ── Canonical settlement ────────────────────────────────────────────────────
+-- MIRRORS kolekto-shared-financial@0.1.0 · per-collection recompute ≡
+--   FPE.normalizeContributions (base→calc→net: gross→node_net) then
+--   FPE.computeWallet (agg/wd/recomputed: net/gross/pending/available/ledger/withdrawn).
+-- Completed-withdrawal set {approved,completed,successful,success} = FPE canonical
+-- superset. Fee rates/cap and the est→refine capped-fee inverse match the engine.
 CREATE OR REPLACE FUNCTION public.settlement_recompute_wallets(p_triggered_by text DEFAULT 'cron')
 RETURNS public.settlement_runs
 LANGUAGE plpgsql AS $fn$

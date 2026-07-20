@@ -4,7 +4,14 @@ import { supabase } from "../utils/client.js";
 // can never drift from the encrypt side in controllers/settings/profile.js.
 import { decryptAccountNumber } from "../utils/accountCrypto.js";
 import { sendEmail } from "../services/emailService.js";
-import { computeWalletBalances, roundCurrency, normalizeContributions } from "../utils/financial.js";
+import {
+    computeWalletBalances,
+    roundCurrency,
+    normalizeContributions,
+    computeWithdrawalEligibility,
+    computePendingWithdrawals,
+    PENDING_WITHDRAWAL_STATUSES,
+} from "../utils/financial.js";
 import { withdrawalRequestTemplate } from "../templates/withdrawalRequest.js";
 import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawalApprovalRequest.js";
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
@@ -81,7 +88,9 @@ async function refreshWallet(walletId, collectionId) {
 // collection is the only number the UI and request validator should ever
 // compare against — it's the invariant that holds across cron runs, admin
 // approvals, and concurrent requests.
-const PENDING_WITHDRAWAL_STATUSES = ["pending", "processing"];
+//
+// The pending-status list is the canonical set from the engine
+// (PENDING_WITHDRAWAL_STATUSES, imported above) — no longer hardcoded here.
 
 async function sumPendingWithdrawals(collectionId, { excludeId = null } = {}) {
     let query = supabase
@@ -241,14 +250,14 @@ export const getEligibleCollections = async (req, res) => {
             // Compute the live balances from source of truth!
             const balances = computeWalletBalances(normalizedContribs, colWithdrawals);
 
-            // Compute pending withdrawals (status in "pending" or "processing")
-            const pendingReqs = roundCurrency(
-                colWithdrawals
-                    .filter((row) => PENDING_WITHDRAWAL_STATUSES.includes(String(row.status || "")))
-                    .reduce((sum, row) => sum + Number(row.amount || 0), 0)
+            // Pending withdrawal requests + strict withdrawable cap — delegated
+            // to the engine (identical math to the previous inline version:
+            // Σ pending/processing requests, then max(0, available − pending)).
+            const pendingReqs = computePendingWithdrawals(colWithdrawals);
+            const { cap } = computeWithdrawalEligibility(
+                { available: balances.availableBalance },
+                pendingReqs
             );
-
-            const cap = roundCurrency(Math.max(0, balances.availableBalance - pendingReqs));
 
             return {
                 ...c,
