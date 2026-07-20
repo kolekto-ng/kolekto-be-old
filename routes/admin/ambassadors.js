@@ -20,7 +20,7 @@ import {
   updateAdminAmbassadorResource,
 } from '../../controllers/ambassador.js';
 import verifyToken from '../../utils/verifyToken.js';
-import requireAdmin from '../../utils/requireAdmin.js';
+import requireAdmin, { requireSuperAdmin } from '../../utils/requireAdmin.js';
 
 const router = express.Router();
 const upload = multer({
@@ -43,9 +43,9 @@ router.post('/ambassadors/applications/:id/suspend', verifyToken, requireAdmin, 
 router.post('/ambassadors/applications/:id/reactivate', verifyToken, requireAdmin, reactivateAmbassador);
 router.post('/ambassadors/applications/:id/notes', verifyToken, requireAdmin, addAmbassadorApplicationNote);
 
-// Ambassador withdrawal management
-router.get('/ambassadors/withdrawals', verifyToken, requireAdmin, listAdminAmbassadorWithdrawals);
-router.patch('/ambassadors/withdrawals/:id', verifyToken, requireAdmin, updateAdminAmbassadorWithdrawal);
+// Ambassador withdrawal management — SUPER-ADMIN only (Task 2: Ambassador Payout gated)
+router.get('/ambassadors/withdrawals', verifyToken, requireSuperAdmin, listAdminAmbassadorWithdrawals);
+router.patch('/ambassadors/withdrawals/:id', verifyToken, requireSuperAdmin, updateAdminAmbassadorWithdrawal);
 
 // Admin organizer-to-ambassador linking (retroactive referral attribution)
 router.post('/ambassadors/:id/link-organizer', verifyToken, requireAdmin, adminLinkOrganizerToAmbassador);
