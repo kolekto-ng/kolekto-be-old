@@ -22,6 +22,7 @@ import ambassadorRouter from "./routes/ambassador.js";
 import adminAmbassadorsRouter from "./routes/admin/ambassadors.js";
 import adminEmailCampaignsRouter from "./routes/admin/emailCampaigns.js";
 import emailPublicRouter from "./routes/emailPublic.js";
+import healthRouter from "./routes/health.js";
 import helmet from "helmet";
 import { verifyEmailConfig } from "./services/emailService.js";
 import { verifyAmbassadorEmailConfig } from "./utils/ambassadorMailer.js";
@@ -37,6 +38,8 @@ import { handleWebhook } from "./controllers/deposit.js";
 import { installProcessGuards } from "./utils/processGuards.js";
 import requestContext from "./middleware/requestContext.js";
 import { notFound, errorHandler } from "./middleware/errorHandler.js";
+import { runStartupProbe } from "./utils/supabaseStartupProbe.js";
+import { setDependencyStatus } from "./utils/readiness.js";
 
 // Install process-level crash guards BEFORE anything else can throw. On Node 22
 // an unhandled rejection would otherwise terminate the process by default —
@@ -109,6 +112,11 @@ app.post(
 
 app.use(express.json());
 app.use(cookieParser());
+
+// Liveness/readiness endpoints — unauthenticated, secret-free. Mounted early so
+// they answer even while the rest of the app is degraded. /health/ready is 503
+// until the startup probe confirms privileged Supabase access (see app.listen).
+app.use(healthRouter);
 
 app.get("/", (req, res) => {
     res.status(200).json({
@@ -308,6 +316,37 @@ app.listen(port, '0.0.0.0', async () => {
     const keyRaw = process.env.ACCOUNT_ENCRYPTION_KEY;
     console.log("[startup] ACCOUNT_ENCRYPTION_KEY:", keyRaw ? `present (length=${keyRaw.length})` : "MISSING");
     verifyAccountEncryptionConfig();
+
+    // ── Privileged-dependency readiness probe ────────────────────────────────
+    // A valid service-role KEY STRING is not proof of ACCESS: a wrong project,
+    // rotated grant, or network partition constructs a fine client yet denies
+    // every privileged read at runtime — the exact failure that made Payment
+    // Monitoring and Communications render empty. This actively verifies the
+    // access path (minimal, read-only, secret-free) and flips readiness so
+    // /health/ready reports 503 instead of the backend looking healthy while
+    // its financial/operational dashboards are silently blind.
+    try {
+        const probe = await runStartupProbe();
+        setDependencyStatus("supabase", { ok: probe.ok, reason: probe.reason });
+        if (!probe.ok) {
+            console.error("[FATAL] Supabase service-role configuration is unavailable.");
+            console.error("[ERROR] Required privileged database access cannot be verified.");
+            console.error("[ERROR] Payment Monitoring and Communications cannot safely operate.");
+            console.error(`[ERROR] dependency=supabase component=startup_probe status=failed reason=${probe.reason}`);
+            // Readiness lifecycle: process stays ALIVE (so /health/live is 200 and
+            // logs keep flowing) but NOT READY. Set STRICT_STARTUP_PROBE=true to
+            // turn this into a hard, non-zero exit on deploy targets that prefer a
+            // crash-loop to a running-but-unready process.
+            if (process.env.STRICT_STARTUP_PROBE === "true") {
+                console.error("STRICT_STARTUP_PROBE=true — refusing to run without verified privileged access.");
+                process.exit(1);
+            }
+        }
+    } catch (err) {
+        setDependencyStatus("supabase", { ok: false, reason: "probe_threw" });
+        console.error("[FATAL] Supabase startup probe threw:", err?.message || err);
+        if (process.env.STRICT_STARTUP_PROBE === "true") process.exit(1);
+    }
     // Initialize email service on startup, but don't block the API in dev
     if (process.env.NODE_ENV === "production") {
         await initializeEmailService();

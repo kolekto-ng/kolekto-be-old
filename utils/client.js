@@ -1,52 +1,52 @@
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { assertSupabaseConfig } from './supabaseConfig.js';
 
 // Ensure we always load `kolekto-backend/.env` regardless of where Node is started.
 dotenv.config({ path: new URL("../.env", import.meta.url) });
 
-const supabaseUrl = process.env.SUPABASE_URL;
-// On the backend we generally want the service role key so we can perform
-// server-side writes regardless of RLS (the Express auth layer is the gate).
-const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    // Non-fatal, but LOUD: running on the anon key means every server-side write
-    // to an RLS-protected, service-role-only table is silently denied. This is
-    // the confirmed root cause of two production incidents — the Communication /
-    // Email Campaigns section (email_campaigns et al. are RLS-on / no-policy, so
-    // reads return 0 rows and writes throw "violates row-level security policy")
-    // and the push/notifications pipeline (notifications, push_notification_events,
-    // claim_push_notification_event). Payments still work because they run through
-    // the edge functions (service role), which is why this hides so easily.
-    console.error(
-        "\n" +
-        "############################################################################\n" +
-        "## ❌ SUPABASE_SERVICE_ROLE_KEY IS NOT SET — falling back to the anon key. ##\n" +
-        "############################################################################\n" +
-        "## RLS-protected, service-role-only tables are now INACCESSIBLE to the    ##\n" +
-        "## backend. Known impact until this is fixed:                             ##\n" +
-        "##   • Communication → Mail (email_campaigns/templates/recipients):       ##\n" +
-        "##       list endpoints return EMPTY, create/update throw RLS violations. ##\n" +
-        "##   • Push / in-app notifications (notifications,                        ##\n" +
-        "##       push_notification_events, claim_push_notification_event): denied.##\n" +
-        "## FIX: set SUPABASE_SERVICE_ROLE_KEY in the backend environment.         ##\n" +
-        "############################################################################\n"
-    );
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// FAIL FAST. The backend is a privileged service: every server-side read/write
+// to an RLS-protected, service-role-only table (pending_payment_context,
+// email_campaigns/*, notifications, push_notification_events, …) REQUIRES the
+// service-role key. The old code silently fell back to the anon key when the
+// service-role key was missing — which does not error, it just makes RLS return
+// zero rows, so Payment Monitoring and Communications rendered EMPTY while the
+// data existed and was merely unreadable (incident: kolekto-1784556863591-704214).
+//
+// assertSupabaseConfig throws here, at import time, if SUPABASE_SERVICE_ROLE_KEY
+// is missing or is actually an anon/wrong-role key. Because app.js transitively
+// imports this module, that throw crashes startup with a precise, structured
+// error instead of booting a healthy-looking app with empty dashboards. There is
+// NO anon fallback for privileged access anymore — that is the whole point.
+// ─────────────────────────────────────────────────────────────────────────────
+const cfg = assertSupabaseConfig(process.env);
 
-if (!supabaseUrl || !supabaseKey) {
-    // Fail fast: callers will get a clear error rather than mysterious 500s.
-    throw new Error(
-        "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY/SUPABASE_ANON_KEY in environment"
-    );
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey, {
+const AUTH_OPTS = {
     auth: {
         persistSession: false,
         autoRefreshToken: false,
         detectSessionInUrl: false,
     },
-});
+};
 
-export { supabase };
+// PRIVILEGED BACKEND CLIENT — uses the service-role key and bypasses RLS.
+// Use this for EVERY server-side read/write to protected tables. The Express
+// auth layer (verifyToken + requireAdmin/requireSuperAdmin) is the access gate,
+// not RLS.
+export const serviceSupabase = createClient(cfg.url, cfg.serviceRoleKey, AUTH_OPTS);
+
+// PUBLIC / USER-SCOPED CLIENT — uses the anon key, so RLS IS enforced. Only for
+// operations that must run as an anonymous/user identity (e.g. verifying a user
+// access token against GoTrue). It is NULL when no anon key is configured;
+// callers that need it must handle that. NEVER use this to read privileged
+// tables — it will silently return zero rows.
+export const publicSupabase = cfg.anonKey
+    ? createClient(cfg.url, cfg.anonKey, AUTH_OPTS)
+    : null;
+
+// Backwards-compatible export. Historically the whole codebase imports
+// `{ supabase }` from here. It now points at the PRIVILEGED service client and
+// is GUARANTEED to be the service-role client — never a silent anon fallback.
+// Existing imports keep working unchanged.
+export const supabase = serviceSupabase;

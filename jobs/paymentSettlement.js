@@ -11,13 +11,12 @@
  * No custom RPC function is required — all logic runs in the application layer.
  */
 import cron from "node-cron";
-import { createClient } from "@supabase/supabase-js";
 import { makeSettlementService } from "../services/settlementService.js";
-
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY
-);
+// Settlement is a privileged financial job. Use the SHARED service-role client
+// from utils/client.js — it fails fast on a missing/invalid service-role key
+// instead of silently falling back to the anon key (which would leave RLS
+// denying every wallet read and the job settling nothing while logging success).
+import { serviceSupabase as supabase } from "../utils/client.js";
 
 /**
  * Settle pending balances for all active collection wallets.
