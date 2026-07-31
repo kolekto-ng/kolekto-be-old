@@ -1,15 +1,8 @@
 import nodemailer from 'nodemailer';
-import dotenv from 'dotenv';
+import axios from 'axios';
 
-dotenv.config();
+const ZEPTOMAIL_API_URL = 'https://api.zeptomail.com/v1.1/email';
 
-// Dedicated SMTP transport for the Email Campaign / Communications system,
-// backed by its own ZeptoMail Mail Agent ("Kolekto Marketing"). This is
-// intentionally isolated from both services/emailService.js (main
-// transactional mailer) and utils/ambassadorMailer.js (Ambassador Program
-// mailer) — separate credentials, separate transporter, separate failure
-// domain. Bulk campaign sends must never affect transactional deliverability
-// (password resets, receipts) or Ambassador lifecycle emails, and vice versa.
 const createMarketingTransporter = () => {
   return nodemailer.createTransport({
     host: process.env.MARKETING_SMTP_HOST,
@@ -19,65 +12,95 @@ const createMarketingTransporter = () => {
       user: process.env.MARKETING_SMTP_USER,
       pass: process.env.MARKETING_SMTP_PASS,
     },
-    tls: {
-      rejectUnauthorized: process.env.NODE_ENV === 'production',
-    },
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
   });
 };
 
-/**
- * Health check for the Marketing Mail Agent's SMTP connectivity/auth.
- * Mirrors verifyAmbassadorEmailConfig() in utils/ambassadorMailer.js.
- */
+const toAddressList = (value) => {
+  const list = Array.isArray(value) ? value : [value];
+  return list.filter(Boolean).map(addr => ({ email_address: { address: addr.trim() } }));
+};
+
+const sendMarketingViaHttpApi = async ({ to, subject, html, text, cc, bcc }) => {
+  const apiKey = process.env.MARKETING_SMTP_PASS;
+  if (!apiKey) throw new Error('MARKETING_SMTP_PASS not configured');
+
+  const fromAddress = process.env.MARKETING_SMTP_FROM || '';
+  const fromName = process.env.MARKETING_SMTP_FROM_NAME || 'Kolekto';
+
+  const payload = {
+    from: { address: fromAddress, name: fromName },
+    to: toAddressList(to),
+    subject,
+    htmlbody: html,
+    textbody: text || '',
+  };
+
+  if (cc) payload.cc = toAddressList(cc);
+  if (bcc) payload.bcc = toAddressList(bcc);
+
+  const response = await axios.post(ZEPTOMAIL_API_URL, payload, {
+    headers: {
+      'Authorization': `Zoho-enczapikey ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    timeout: 10000,
+  });
+
+  return { success: true, messageId: response.data?.messageId, response: response.data };
+};
+
+const sendMarketingViaSmtp = async ({ to, subject, html, text, attachments, cc, bcc }) => {
+  const transporter = createMarketingTransporter();
+  const fromAddress = process.env.MARKETING_SMTP_FROM || process.env.MARKETING_SMTP_USER;
+  const fromName = process.env.MARKETING_SMTP_FROM_NAME || 'Kolekto';
+
+  const mailOptions = {
+    from: `"${fromName}" <${fromAddress}>`,
+    to: Array.isArray(to) ? to.join(', ') : to,
+    subject,
+    text,
+    html,
+    ...(cc && { cc: Array.isArray(cc) ? cc.join(', ') : cc }),
+    ...(bcc && { bcc: Array.isArray(bcc) ? bcc.join(', ') : bcc }),
+    ...(attachments && { attachments }),
+  };
+
+  const info = await transporter.sendMail(mailOptions);
+  return { success: true, messageId: info.messageId, response: info.response };
+};
+
 export const verifyMarketingEmailConfig = async () => {
   try {
-    const transporter = createMarketingTransporter();
-    await transporter.verify();
-    console.log('✅ [marketing-mailer] SMTP connection verified — ready to send');
+    const apiKey = process.env.MARKETING_SMTP_PASS;
+    if (!apiKey) throw new Error('MARKETING_SMTP_PASS not configured');
+    console.log('✅ [marketing-mailer] HTTP API key configured');
     return true;
   } catch (error) {
-    console.error('❌ [marketing-mailer] SMTP configuration error:', error?.message || error);
+    console.error('❌ [marketing-mailer] configuration error:', error?.message || error);
     return false;
   }
 };
 
-/**
- * Sends a single email via the dedicated Marketing Mail Agent. Same
- * never-throw contract as the other mailers — always resolves to
- * { success, messageId?, response?, error? } — so the queue worker and
- * retry wrapper can call it repeatedly without new error-handling scaffolding.
- */
 export const sendMarketingMail = async ({ to, subject, html, text, attachments, cc, bcc }) => {
   try {
-    const transporter = createMarketingTransporter();
+    if (attachments) {
+      const result = await sendMarketingViaSmtp({ to, subject, html, text, attachments, cc, bcc });
+      return result;
+    }
 
-    const fromAddress = process.env.MARKETING_SMTP_FROM || process.env.MARKETING_SMTP_USER;
-    const fromName = process.env.MARKETING_SMTP_FROM_NAME || 'Kolekto';
-
-    const mailOptions = {
-      from: `"${fromName}" <${fromAddress}>`,
-      to: Array.isArray(to) ? to.join(', ') : to,
-      subject,
-      text,
-      html,
-      ...(cc && { cc: Array.isArray(cc) ? cc.join(', ') : cc }),
-      ...(bcc && { bcc: Array.isArray(bcc) ? bcc.join(', ') : bcc }),
-      ...(attachments && { attachments }),
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-    console.log('✅ [marketing-mailer] Email sent successfully:', info.messageId);
-    return {
-      success: true,
-      messageId: info.messageId,
-      response: info.response,
-    };
-  } catch (error) {
-    console.error('❌ [marketing-mailer] Error sending email:', error?.message || error);
-    return {
-      success: false,
-      error: error.message,
-    };
+    const result = await sendMarketingViaHttpApi({ to, subject, html, text, cc, bcc });
+    return result;
+  } catch (httpError) {
+    console.warn('⚠️ [marketing-mailer] HTTP API failed, falling back to SMTP:', httpError?.message || httpError);
+    try {
+      const result = await sendMarketingViaSmtp({ to, subject, html, text, cc, bcc });
+      return result;
+    } catch (smtpError) {
+      console.error('❌ [marketing-mailer] Error sending email:', smtpError?.message || smtpError);
+      return { success: false, error: smtpError.message };
+    }
   }
 };
 

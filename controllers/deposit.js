@@ -4,6 +4,7 @@ import { createContribution } from "./contribution.js";
 import crypto from "node:crypto";
 import { sendEmail } from "../services/emailService.js";
 import { sendPaymentInitialize, sendPaymentConfirmation } from "../utils/emailHelper.js";
+import { contributionReceivedTemplate } from "../templates/emailTemplates.js";
 import {
     notifyContributionByReference,
     notifyPaymentIssue,
@@ -1049,31 +1050,12 @@ export const sendReceiptNotification = async (req, res) => {
                     results.organizer = await sendEmail({
                         to: organizer.email,
                         subject: `New Payment Received — ${collectionTitle}`,
-                        html: `
-                          <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px;">
-                            <div style="background:linear-gradient(135deg,#1B5E20,#388E3C);padding:24px;border-radius:8px 8px 0 0;text-align:center;">
-                              <h1 style="color:#fff;margin:0;font-size:20px;">New Payment Received</h1>
-                            </div>
-                            <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
-                              <p style="color:#374151;margin:0 0 16px;">Hi <strong>${organizer.full_name || "there"}</strong>,</p>
-                              <p style="color:#4b5563;margin:0 0 24px;">You have received a new payment for <strong>${collectionTitle}</strong>.</p>
-                              <table style="width:100%;border-collapse:collapse;font-size:14px;">
-                                <tr style="border-bottom:1px solid #f3f4f6;">
-                                  <td style="padding:10px 0;color:#6b7280;">Payer</td>
-                                  <td style="padding:10px 0;color:#111827;font-weight:600;text-align:right;">${payerName || payerEmail}</td>
-                                </tr>
-                                <tr style="border-bottom:1px solid #f3f4f6;">
-                                  <td style="padding:10px 0;color:#6b7280;">Amount</td>
-                                  <td style="padding:10px 0;color:#16a34a;font-weight:700;font-size:16px;text-align:right;">${amountFormatted}</td>
-                                </tr>
-                                <tr>
-                                  <td style="padding:10px 0;color:#6b7280;">Reference</td>
-                                  <td style="padding:10px 0;color:#111827;font-family:monospace;text-align:right;">${transactionRef}</td>
-                                </tr>
-                              </table>
-                              <p style="color:#9ca3af;font-size:12px;margin:24px 0 0;text-align:center;">Kolekto · Secure group payments</p>
-                            </div>
-                          </div>`,
+                        html: contributionReceivedTemplate(
+                            organizer.full_name || "there",
+                            payerName || payerEmail,
+                            amountFormatted,
+                            collectionTitle
+                        ),
                     });
                     console.log("[sendReceiptNotification] ✅ Organizer email sent to", organizer.email);
                 }

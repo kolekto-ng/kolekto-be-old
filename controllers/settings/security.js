@@ -4,6 +4,7 @@ import util from "util";
 import { EMAIL_RE, sha256, randomOtp6, otpHash, randomToken, tokenHash } from "../../utils/otp.js";
 import { resolveUserEmail } from "../../utils/userLookup.js";
 import { getFrontendUrl } from "../../utils/frontendUrl.js";
+import { otpCodeTemplate, notificationTemplate } from "../../templates/emailTemplates.js";
 
 export const requestPasswordChangeOtp = async (req, res) => {
   const userId = req.user?.id;
@@ -96,21 +97,19 @@ export const requestPasswordChangeOtp = async (req, res) => {
       });
     }
 
-    const html = `
-      <div style="font-family:Arial,sans-serif;line-height:1.4">
-        <h2 style="margin:0 0 12px">Kolekto Password Change Code</h2>
-        <p style="margin:0 0 12px">Use this code to change your password:</p>
-        <div style="font-size:28px;font-weight:700;letter-spacing:6px;margin:12px 0">${otp}</div>
-        <p style="margin:0;color:#555">This code expires in 10 minutes. If you didn’t request this, you can ignore this email.</p>
-      </div>
-    `;
+    const html = otpCodeTemplate("there", "Password Change Code", "Use this code to change your password:", otp, 10);
 
-    await sendEmail({
+    const pwEmailResult = await sendEmail({
       to: email,
       subject: "Your Kolekto password change code",
       html,
       text: `Your Kolekto password change code is ${otp}. It expires in 10 minutes.`,
     });
+
+    if (!pwEmailResult?.success) {
+      console.error("requestPasswordChangeOtp email delivery failed:", pwEmailResult?.error);
+      return res.status(502).json({ error: "We couldn't send the verification code to your email. Please try again in a moment." });
+    }
 
     return res.status(200).json({ success: true, email });
   } catch (err) {
@@ -309,21 +308,19 @@ export const requestEmailChangeOtp = async (req, res) => {
       return res.status(500).json({ error: "Failed to create request", details: insertErr.message });
     }
 
-    const html = `
-      <div style="font-family:Arial,sans-serif;line-height:1.4">
-        <h2 style="margin:0 0 12px">Kolekto Email Change Code</h2>
-        <p style="margin:0 0 12px">Use this code to confirm you want to change your account email to <strong>${newEmail}</strong>:</p>
-        <div style="font-size:28px;font-weight:700;letter-spacing:6px;margin:12px 0">${otp}</div>
-        <p style="margin:0;color:#555">This code expires in 10 minutes. If you didn’t request this, you can ignore this email — your account email will not change.</p>
-      </div>
-    `;
+    const html = otpCodeTemplate("there", "Email Change Code", `Use this code to confirm you want to change your account email to <strong>${newEmail}</strong>:`, otp, 10);
 
-    await sendEmail({
+    const emailResult = await sendEmail({
       to: currentEmail,
       subject: "Your Kolekto email change code",
       html,
       text: `Your Kolekto email change code is ${otp}. It expires in 10 minutes.`,
     });
+
+    if (!emailResult?.success) {
+      console.error("requestEmailChangeOtp email delivery failed:", emailResult?.error);
+      return res.status(502).json({ error: "We couldn't send the verification code to your email. Please try again in a moment." });
+    }
 
     return res.status(200).json({ success: true, email: currentEmail });
   } catch (err) {
@@ -393,21 +390,19 @@ export const verifyEmailChangeOtp = async (req, res) => {
     }
 
     const confirmUrl = `${getFrontendUrl()}/confirm-email-change?token=${token}`;
-    const html = `
-      <div style="font-family:Arial,sans-serif;line-height:1.4">
-        <h2 style="margin:0 0 12px">Confirm your new Kolekto email</h2>
-        <p style="margin:0 0 12px">Click the link below to finish changing your account email to this address:</p>
-        <p style="margin:0 0 12px"><a href="${confirmUrl}" style="color:#1B5E20;font-weight:600">Confirm email change</a></p>
-        <p style="margin:0;color:#555">This link expires in 30 minutes. If you didn’t request this, you can ignore this email.</p>
-      </div>
-    `;
+    const html = notificationTemplate("there", "Confirm your new Kolekto email", "Click the link below to finish changing your account email to this address:", confirmUrl, "Confirm email change");
 
-    await sendEmail({
+    const confirmEmailResult = await sendEmail({
       to: record.new_email,
       subject: "Confirm your new Kolekto email",
       html,
       text: `Confirm your new Kolekto email: ${confirmUrl} (expires in 30 minutes)`,
     });
+
+    if (!confirmEmailResult?.success) {
+      console.error("verifyEmailChangeOtp email delivery failed:", confirmEmailResult?.error);
+      return res.status(502).json({ error: "We couldn't send the confirmation link. Please try again in a moment." });
+    }
 
     return res.status(200).json({ success: true, newEmail: record.new_email });
   } catch (err) {
