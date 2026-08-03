@@ -47,6 +47,41 @@ import { setDependencyStatus } from "./utils/readiness.js";
 // keeping the API up. See utils/processGuards.js.
 installProcessGuards();
 
+// Router-import sanity check — fails loud and names the culprit instead of
+// letting a bad import (wrong export name, circular dependency, etc.) surface
+// as Express's generic "app.use() requires a middleware function but got
+// undefined", which gives no clue which of the ~20 mounted routers is broken.
+[
+    ['authRouter', authRouter],
+    ['collectorRouter', collectorRouter],
+    ['collectionTransferRouter', collectionTransferRouter],
+    ['collectionAccessRouter', collectionAccessRouter],
+    ['dashboardRouter', dashboardRouter],
+    ['paymentRouter', paymentRouter],
+    ['contributorRouter', contributorRouter],
+    ['withdrawalRouter', withdrawalRouter],
+    ['profileRouter', profileRouter],
+    ['kycRouter', kycRouter],
+    ['securityRouter', securityRouter],
+    ['landingPageRouter', landingPageRouter],
+    ['adminRouter', adminRouter],
+    ['adminPaymentsRouter', adminPaymentsRouter],
+    ['adminPaymentMonitoringRouter', adminPaymentMonitoringRouter],
+    ['pushRouter', pushRouter],
+    ['ambassadorRouter', ambassadorRouter],
+    ['adminAmbassadorsRouter', adminAmbassadorsRouter],
+    ['adminEmailCampaignsRouter', adminEmailCampaignsRouter],
+    ['emailPublicRouter', emailPublicRouter],
+    ['healthRouter', healthRouter],
+].forEach(([name, router]) => {
+    if (typeof router !== 'function') {
+        throw new Error(
+            `[startup] Router "${name}" did not import correctly (got ${typeof router} instead of an Express router/function). ` +
+            `This router would otherwise be silently missing or crash the process at mount time with no indication of which module is at fault.`
+        );
+    }
+});
+
 const app = express();
 app.use(helmet());
 
