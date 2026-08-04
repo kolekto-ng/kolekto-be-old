@@ -1,58 +1,10 @@
-import crypto from "crypto";
 import { supabase } from "../../utils/client.js";
 import { sendEmail } from "../../services/emailService.js";
 import util from "util";
-
-function sha256(value) {
-  return crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
-}
-
-function randomOtp6() {
-  // 000000-999999, padded to 6 digits
-  return String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
-}
-
-function otpPepper() {
-  // Use something stable server-side; service role key is available in env and is secret.
-  return (
-    process.env.OTP_PEPPER ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.ACCOUNT_ENCRYPTION_KEY ||
-    "kolekto-otp"
-  );
-}
-
-function otpHash(userId, otp) {
-  return sha256(`${userId}:${otp}:${otpPepper()}`);
-}
-
-async function resolveUserEmail(userId, fallbackEmail) {
-  if (fallbackEmail) return fallbackEmail;
-
-  try {
-    const { data, error } = await supabase.auth.admin.getUserById(userId);
-    if (!error && data?.user?.email) {
-      return data.user.email;
-    }
-  } catch (err) {
-    console.error("resolveUserEmail auth lookup error:", err);
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("email")
-      .eq("id", userId)
-      .maybeSingle();
-    if (!error && data?.email) {
-      return data.email;
-    }
-  } catch (err) {
-    console.error("resolveUserEmail profile lookup error:", err);
-  }
-
-  return null;
-}
+import { EMAIL_RE, sha256, randomOtp6, otpHash, randomToken, tokenHash } from "../../utils/otp.js";
+import { resolveUserEmail } from "../../utils/userLookup.js";
+import { getFrontendUrl } from "../../utils/frontendUrl.js";
+import { otpCodeTemplate, notificationTemplate } from "../../templates/emailTemplates.js";
 
 export const requestPasswordChangeOtp = async (req, res) => {
   const userId = req.user?.id;
@@ -145,21 +97,19 @@ export const requestPasswordChangeOtp = async (req, res) => {
       });
     }
 
-    const html = `
-      <div style="font-family:Arial,sans-serif;line-height:1.4">
-        <h2 style="margin:0 0 12px">Kolekto Password Change Code</h2>
-        <p style="margin:0 0 12px">Use this code to change your password:</p>
-        <div style="font-size:28px;font-weight:700;letter-spacing:6px;margin:12px 0">${otp}</div>
-        <p style="margin:0;color:#555">This code expires in 10 minutes. If you didn’t request this, you can ignore this email.</p>
-      </div>
-    `;
+    const html = otpCodeTemplate("there", "Password Change Code", "Use this code to change your password:", otp, 10);
 
-    await sendEmail({
+    const pwEmailResult = await sendEmail({
       to: email,
       subject: "Your Kolekto password change code",
       html,
       text: `Your Kolekto password change code is ${otp}. It expires in 10 minutes.`,
     });
+
+    if (!pwEmailResult?.success) {
+      console.error("requestPasswordChangeOtp email delivery failed:", pwEmailResult?.error);
+      return res.status(502).json({ error: "We couldn't send the verification code to your email. Please try again in a moment." });
+    }
 
     return res.status(200).json({ success: true, email });
   } catch (err) {
@@ -298,5 +248,240 @@ export const verifyOtpAndChangePassword = async (req, res) => {
       error: err?.message || "Failed to change password",
       code: "PASSWORD_CHANGE_UNEXPECTED",
     });
+  }
+};
+
+// Step 1: send an OTP to the CURRENT email to prove account ownership before
+// any change is made to the new email is attempted.
+export const requestEmailChangeOtp = async (req, res) => {
+  const userId = req.user?.id;
+  const currentEmail = await resolveUserEmail(req.user?.id, req.user?.email);
+  const newEmail = String(req.body?.newEmail || "").trim().toLowerCase();
+
+  if (!userId || !currentEmail) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (!EMAIL_RE.test(newEmail)) {
+    return res.status(400).json({ error: "Enter a valid email address" });
+  }
+
+  if (newEmail === currentEmail.toLowerCase()) {
+    return res.status(400).json({ error: "That's already your current email" });
+  }
+
+  try {
+    const { data: existing, error: existingErr } = await supabase
+      .from("profiles")
+      .select("id")
+      .ilike("email", newEmail)
+      .maybeSingle();
+    if (existingErr) {
+      console.error("email_change_requests uniqueness check error:", existingErr);
+      return res.status(500).json({ error: "Could not validate that email. Please try again." });
+    }
+    if (existing) {
+      return res.status(409).json({ error: "That email is already in use" });
+    }
+
+    const otp = randomOtp6();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Invalidate any previous unused requests for this user.
+    await supabase
+      .from("email_change_requests")
+      .update({ used_at: new Date().toISOString() })
+      .eq("user_id", userId)
+      .is("used_at", null);
+
+    const { error: insertErr } = await supabase.from("email_change_requests").insert([
+      {
+        user_id: userId,
+        new_email: newEmail,
+        otp_hash: otpHash(userId, otp),
+        otp_expires_at: expiresAt.toISOString(),
+      },
+    ]);
+
+    if (insertErr) {
+      console.error("email_change_requests insert error:", insertErr);
+      return res.status(500).json({ error: "Failed to create request", details: insertErr.message });
+    }
+
+    const html = otpCodeTemplate("there", "Email Change Code", `Use this code to confirm you want to change your account email to <strong>${newEmail}</strong>:`, otp, 10);
+
+    const emailResult = await sendEmail({
+      to: currentEmail,
+      subject: "Your Kolekto email change code",
+      html,
+      text: `Your Kolekto email change code is ${otp}. It expires in 10 minutes.`,
+    });
+
+    if (!emailResult?.success) {
+      console.error("requestEmailChangeOtp email delivery failed:", emailResult?.error);
+      return res.status(502).json({ error: "We couldn't send the verification code to your email. Please try again in a moment." });
+    }
+
+    return res.status(200).json({ success: true, email: currentEmail });
+  } catch (err) {
+    console.error("requestEmailChangeOtp error:", err);
+    return res.status(500).json({ error: "Failed to send OTP" });
+  }
+};
+
+// Step 2: verify the OTP sent to the current email, then send a confirmation
+// link to the NEW email. The change only applies once that link is clicked
+// (see confirmEmailChange) — this step never touches auth.users/profiles.
+export const verifyEmailChangeOtp = async (req, res) => {
+  const userId = req.user?.id;
+  const otp = String(req.body?.otp || "").trim();
+
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (!/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ error: "OTP must be 6 digits" });
+  }
+
+  try {
+    const { data: rows, error: fetchErr } = await supabase
+      .from("email_change_requests")
+      .select("id, new_email, otp_hash, otp_expires_at, used_at, created_at")
+      .eq("user_id", userId)
+      .is("used_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (fetchErr) {
+      console.error("email_change_requests fetch error:", fetchErr);
+      return res.status(500).json({ error: "Failed to verify OTP" });
+    }
+
+    const record = rows?.[0];
+    if (!record) {
+      return res.status(400).json({ error: "No active request found. Please start again." });
+    }
+
+    if (new Date(record.otp_expires_at).getTime() < Date.now()) {
+      await supabase.from("email_change_requests").update({ used_at: new Date().toISOString() }).eq("id", record.id);
+      return res.status(400).json({ error: "OTP expired. Please start again." });
+    }
+
+    if (record.otp_hash !== otpHash(userId, otp)) {
+      return res.status(400).json({ error: "Invalid OTP" });
+    }
+
+    const token = randomToken();
+    const confirmExpiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+
+    const { error: updateErr } = await supabase
+      .from("email_change_requests")
+      .update({
+        otp_verified_at: new Date().toISOString(),
+        confirm_token_hash: tokenHash(token),
+        confirm_expires_at: confirmExpiresAt.toISOString(),
+      })
+      .eq("id", record.id);
+
+    if (updateErr) {
+      console.error("email_change_requests update error:", updateErr);
+      return res.status(500).json({ error: "Failed to proceed to confirmation" });
+    }
+
+    const confirmUrl = `${getFrontendUrl()}/confirm-email-change?token=${token}`;
+    const html = notificationTemplate("there", "Confirm your new Kolekto email", "Click the link below to finish changing your account email to this address:", confirmUrl, "Confirm email change");
+
+    const confirmEmailResult = await sendEmail({
+      to: record.new_email,
+      subject: "Confirm your new Kolekto email",
+      html,
+      text: `Confirm your new Kolekto email: ${confirmUrl} (expires in 30 minutes)`,
+    });
+
+    if (!confirmEmailResult?.success) {
+      console.error("verifyEmailChangeOtp email delivery failed:", confirmEmailResult?.error);
+      return res.status(502).json({ error: "We couldn't send the confirmation link. Please try again in a moment." });
+    }
+
+    return res.status(200).json({ success: true, newEmail: record.new_email });
+  } catch (err) {
+    console.error("verifyEmailChangeOtp error:", err);
+    return res.status(500).json({ error: "Failed to verify OTP" });
+  }
+};
+
+// Step 3: the confirmation link the user clicks from their NEW inbox. No
+// verifyToken here — the token itself is the credential, since the user may
+// click this from a different device/session than the one that started the
+// request (same pattern as Supabase's own password-reset-via-link).
+export const confirmEmailChange = async (req, res) => {
+  const token = String(req.body?.token || "").trim();
+
+  if (!token) {
+    return res.status(400).json({ error: "Missing confirmation token" });
+  }
+
+  try {
+    const { data: rows, error: fetchErr } = await supabase
+      .from("email_change_requests")
+      .select("id, user_id, new_email, otp_verified_at, confirm_expires_at, used_at")
+      .eq("confirm_token_hash", tokenHash(token))
+      .is("used_at", null)
+      .limit(1);
+
+    if (fetchErr) {
+      console.error("confirmEmailChange fetch error:", fetchErr);
+      return res.status(500).json({ error: "Failed to confirm email change" });
+    }
+
+    const record = rows?.[0];
+    if (!record || !record.otp_verified_at) {
+      return res.status(400).json({ error: "Invalid or already-used confirmation link" });
+    }
+
+    if (!record.confirm_expires_at || new Date(record.confirm_expires_at).getTime() < Date.now()) {
+      return res.status(400).json({ error: "This confirmation link has expired. Please start again." });
+    }
+
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      console.error("confirmEmailChange: SUPABASE_SERVICE_ROLE_KEY is not configured.");
+      return res.status(500).json({
+        error: "Email change is temporarily unavailable. Please contact support.",
+        code: "ADMIN_KEY_MISSING",
+      });
+    }
+
+    const { error: authErr } = await supabase.auth.admin.updateUserById(record.user_id, {
+      email: record.new_email,
+      email_confirm: true,
+    });
+
+    if (authErr) {
+      console.error("confirmEmailChange auth update error:", authErr);
+      const raw = String(authErr.message || "").toLowerCase();
+      const message = raw.includes("already") || raw.includes("registered")
+        ? "That email is already in use by another account."
+        : authErr.message || "Failed to update email";
+      return res.status(400).json({ error: message });
+    }
+
+    const { error: profileErr } = await supabase
+      .from("profiles")
+      .update({ email: record.new_email, updated_at: new Date().toISOString() })
+      .eq("id", record.user_id);
+
+    if (profileErr) {
+      // Auth email already changed at this point — log loudly so it can be
+      // reconciled manually rather than silently drifting from auth.users.
+      console.error("confirmEmailChange profiles sync error (auth already updated):", profileErr);
+    }
+
+    await supabase.from("email_change_requests").update({ used_at: new Date().toISOString() }).eq("id", record.id);
+
+    return res.status(200).json({ success: true, email: record.new_email });
+  } catch (err) {
+    console.error("confirmEmailChange error:", err);
+    return res.status(500).json({ error: "Failed to confirm email change" });
   }
 };
