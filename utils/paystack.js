@@ -28,6 +28,26 @@ export async function getBanks() {
     }
 }
 
+/**
+ * Read-only Paystack transaction verify — for admin preview UIs (Payment
+ * Monitoring dashboard) that need to show "what does Paystack actually say
+ * about this reference right now" without triggering any contribution
+ * insert/recovery side effects. Never throws — callers get { ok: false,
+ * error } instead, since this is a best-effort preview, not the source of
+ * truth (verify-paystack-payment remains that).
+ */
+export async function previewTransaction(reference) {
+    try {
+        const res = await paystackApi.get(`/transaction/verify/${reference}`);
+        if (!res.data?.status) {
+            return { ok: false, error: res.data?.message || "Paystack verify returned no status" };
+        }
+        return { ok: true, data: res.data.data };
+    } catch (err) {
+        return { ok: false, error: err?.response?.data?.message || err?.message || "Paystack verify failed" };
+    }
+}
+
 // Verify account number
 export async function verifyAccount(account_number, bank_code) {
     try {
