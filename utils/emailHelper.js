@@ -179,7 +179,11 @@ export const sendPaymentInitialize = async (
     });
 };
 
-// Send payment confirmation email
+// Send payment confirmation email.
+// `extra` (optional, trailing) carries the premium-receipt fields that older
+// positional callers don't supply: { collectionType, collectionDescription,
+// contributionAmount, platformFee, gatewayFee, totalPaid, transactionId,
+// uniqueCodes }. Anything in `extra` is merged last so it can enrich/override.
 export const sendPaymentConfirmation = async (
     payerEmail,
     payerName,
@@ -191,7 +195,8 @@ export const sendPaymentConfirmation = async (
     channel,
     participants = [],
     receiptUrl,
-    organizerName
+    organizerName,
+    extra = {}
 ) => {
     const html = paymentConfirmationTemplate({
         payerName,
@@ -205,7 +210,8 @@ export const sendPaymentConfirmation = async (
         channel: channel || 'card',
         participants,
         receiptUrl,
-        organizerName
+        organizerName,
+        ...extra
     });
 
     const text = `Payment confirmed for ${collectionTitle}. Amount: ${amount}. Reference: ${transactionRef}`;
