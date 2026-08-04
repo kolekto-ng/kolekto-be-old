@@ -11,116 +11,42 @@
  * No custom RPC function is required — all logic runs in the application layer.
  */
 import cron from "node-cron";
-import { createClient } from "@supabase/supabase-js";
-import { computeWalletBalances, normalizeContributions } from "../utils/financial.js";
-
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY
-);
+import { makeSettlementService } from "../services/settlementService.js";
+// Settlement is a privileged financial job. Use the SHARED service-role client
+// from utils/client.js — it fails fast on a missing/invalid service-role key
+// instead of silently falling back to the anon key (which would leave RLS
+// denying every wallet read and the job settling nothing while logging success).
+import { serviceSupabase as supabase } from "../utils/client.js";
 
 /**
  * Settle pending balances for all active collection wallets.
  * Fetches contributions + withdrawals per collection and recomputes
  * all balance fields from scratch using the canonical financial utility.
  */
+// Delegates to the canonical settlement implementation — the Postgres function
+// settlement_recompute_wallets() (database/settlement_recompute.sql) — via
+// services/settlementService.js. The Node balance loop that used to live here
+// was removed: the DB function is now the single source of the settlement math
+// (derives from contributions, never deposits; idempotent; observable).
+//
+// NOTE: the reliable scheduler is pg_cron (job 'settlement-recompute-wallets').
+// Keep RUN_SETTLEMENT_CRON=false so there is exactly ONE active settlement
+// scheduler. This Node path remains for manual/admin triggers and as a fallback.
+const settlementService = makeSettlementService({ supabase });
+
 async function runDailySettlement() {
-    const startedAt = new Date().toISOString();
-    console.log(`[settlement] Starting T+1 settlement run at ${startedAt}`);
-
-    // Fetch all wallets (with their collection IDs)
-    const { data: wallets, error: walletsError } = await supabase
-        .from("wallets")
-        .select("id, collection_id");
-
-    if (walletsError || !wallets) {
-        console.error("[settlement] Failed to fetch wallets:", walletsError);
-        return;
+    console.log("[settlement] Starting T+1 settlement (delegating to settlement_recompute_wallets)...");
+    try {
+        const run = await settlementService.runDailySettlement("cron");
+        console.log(
+            `[settlement] ✅ Settlement complete: wallets=${run?.wallets_processed}, ` +
+            `drift_after=${run?.drift_after}, ok=${run?.ok}`
+        );
+        return run;
+    } catch (err) {
+        console.error("[settlement] ❌ Settlement failed:", err?.message || err);
+        throw err;
     }
-
-    console.log(`[settlement] Processing ${wallets.length} wallets...`);
-
-    let settled = 0;
-    let failed = 0;
-
-    for (const wallet of wallets) {
-        try {
-            const [
-                { data: collection, error: colError },
-                { data: contributions, error: contribError },
-                { data: withdrawals, error: withError }
-            ] = await Promise.all([
-                supabase
-                    .from("collections")
-                    .select("fee_bearer, collection_type")
-                    .eq("id", wallet.collection_id)
-                    .single(),
-                supabase
-                    .from("contributions")
-                    .select("amount, gross_amount, created_at")
-                    .eq("collection_id", wallet.collection_id)
-                    .eq("status", "paid"),
-                supabase
-                    .from("withdrawals")
-                    .select("amount, status")
-                    .eq("collection_id", wallet.collection_id),
-            ]);
-
-            if (colError || contribError || withError) {
-                console.error(
-                    `[settlement] Error fetching data for collection ${wallet.collection_id}:`,
-                    colError || contribError || withError
-                );
-                failed++;
-                continue;
-            }
-
-            const normalized = normalizeContributions(
-                contributions || [],
-                collection?.fee_bearer || "organizer",
-                collection?.collection_type || "fixed"
-            );
-
-            const balances = computeWalletBalances(normalized, withdrawals || []);
-
-            const { error: updateError } = await supabase
-                .from("wallets")
-                .update({
-                    net_payment: balances.netPayment,
-                    pending_balance: balances.pendingBalance,
-                    available_balance: balances.availableBalance,
-                    ledger_balance: balances.ledgerBalance,
-                    withdrawn: balances.completedWithdrawals,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("id", wallet.id);
-
-            if (updateError) {
-                console.error(
-                    `[settlement] Failed to update wallet ${wallet.id}:`,
-                    updateError
-                );
-                failed++;
-                continue;
-            }
-
-            if (balances.pendingBalance === 0 && balances.availableBalance > 0) {
-                // All pending settled — nothing special needed, balances already updated
-            }
-
-            settled++;
-        } catch (err) {
-            console.error(
-                `[settlement] Unexpected error for wallet ${wallet.id}:`,
-                err?.message || err
-            );
-            failed++;
-        }
-    }
-
-    console.log(
-        `[settlement] ✅ Settlement run complete. Settled: ${settled}, Failed: ${failed}. Finished at ${new Date().toISOString()}`
-    );
 }
 
 /**

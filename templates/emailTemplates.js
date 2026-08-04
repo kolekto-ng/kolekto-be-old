@@ -67,6 +67,17 @@ const baseTemplate = (content, title = 'Kolekto') => {
             border-left: 4px solid #4CAF50;
             margin: 20px 0;
         }
+        .otp-code {
+            font-size: 32px;
+            font-weight: bold;
+            letter-spacing: 8px;
+            text-align: center;
+            color: #4CAF50;
+            background-color: #f0f8ff;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
     </style>
 </head>
 <body>
@@ -290,6 +301,22 @@ export const withdrawalRequestTemplate = (userName, amount, status) => {
     return baseTemplate(content, 'Withdrawal Request');
 };
 
+// OTP / Verification Code Template — used by any flow that emails a
+// short-lived code for the recipient to type back in (password change,
+// email change, collection transfer, collection access grants, ...).
+export const otpCodeTemplate = (userName, title, message, otpCode, expiryMinutes = 10) => {
+    const content = `
+        <h2>${title}</h2>
+        <p>Hi ${userName},</p>
+        <p>${message}</p>
+        <div class="otp-code">${otpCode}</div>
+        <p><strong>This code expires in ${expiryMinutes} minute${expiryMinutes === 1 ? '' : 's'}.</strong></p>
+        <p>If you didn't request this, you can safely ignore this email — no changes will be made.</p>
+        <p>Best regards,<br>The Kolekto Team</p>
+    `;
+    return baseTemplate(content, title);
+};
+
 // Generic Notification Template
 export const notificationTemplate = (userName, title, message, actionLink = null, actionText = null) => {
     const content = `
@@ -317,6 +344,7 @@ export default {
     kycApprovedTemplate,
     kycRejectedTemplate,
     withdrawalRequestTemplate,
+    otpCodeTemplate,
     notificationTemplate
 };
 

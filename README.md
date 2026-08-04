@@ -48,6 +48,10 @@ my-supabase-express-app
 - **POST /api/users/signin**: Sign in an existing user.
 - **GET /api/users/me**: Fetch the current user's data (requires authentication).
 
+## PWA and Push
+
+PWA update delivery, VAPID keys, push subscription storage, and realtime testing notes live in [docs/PWA_PUSH_NOTIFICATIONS.md](./docs/PWA_PUSH_NOTIFICATIONS.md).
+
 ## Contributing
 
 Feel free to submit issues or pull requests for improvements or bug fixes.
