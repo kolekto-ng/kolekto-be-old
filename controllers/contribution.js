@@ -1,5 +1,6 @@
 import { supabase } from "../utils/client.js";
 import { calculateFees } from "../utils/financial.js";
+import { normalizeContributorRows } from "../utils/contributionNormalize.js";
 
 // Get contributions, optionally filtered by collectionId
 export const getContributions = async (req, res) => {
@@ -20,7 +21,10 @@ export const getContributions = async (req, res) => {
         return res.status(500).json({ success: false, message: error.message });
     }
 
-    return res.status(200).json({ success: true, data });
+    // Normalize mixed/older row shapes (legacy column names, contributor info
+    // stored under a different key, etc.) into one consistent response shape.
+    // Read-side only — does not touch stored data or any balance/payment logic.
+    return res.status(200).json({ success: true, data: normalizeContributorRows(data) });
 };
 
 export const getSingleCollection = async (req, res) => {
@@ -64,10 +68,15 @@ export const getSingleCollection = async (req, res) => {
 
     const { data, error } = await query.single();
 
-    console.log(data, 'collection data');
-
     if (error) {
         return res.status(404).json({ message: error.message });
+    }
+
+    // A deleted collection is archived (status='deleted'), not removed from the
+    // DB — payment/withdrawal records are preserved for the host — but
+    // contributors must never be able to view or pay into it.
+    if (data?.status === 'deleted') {
+        return res.status(404).json({ message: 'Collection not found' });
     }
 
     // Check if collection is full

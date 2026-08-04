@@ -9,7 +9,7 @@ import {
     getEligibleCollections
 } from "../controllers/withdrawal.js";
 import verifyToken from "../utils/verifyToken.js";
-import requireAdmin from "../utils/requireAdmin.js";
+import { requireSuperAdmin } from "../utils/requireAdmin.js";
 import { getBanksData } from "../utils/banksData.js";
 
 const router = express.Router();
@@ -21,9 +21,9 @@ router.get("/eligible-collections", verifyToken, getEligibleCollections);
 // Request a withdrawal (any authenticated organizer — ownership checked in controller)
 router.post("/request", verifyToken, requestWithdrawal);
 
-// Approve / reject — admin only
-router.post("/approve", verifyToken, requireAdmin, approveWithdrawal);
-router.post("/reject", verifyToken, requireAdmin, rejectWithdrawal);
+// Approve / reject — SUPER-ADMIN only (Task 2: Withdrawal is super-admin gated)
+router.post("/approve", verifyToken, requireSuperAdmin, approveWithdrawal);
+router.post("/reject", verifyToken, requireSuperAdmin, rejectWithdrawal);
 router.get("/banks-data", getBanksData);
 router.get("/", verifyToken, getUserWithdrawals); // Assuming this is for testing or listing withdrawals
 // Paystack webhook for withdrawals
