@@ -4,12 +4,26 @@ import { supabase } from "../utils/client.js";
 // can never drift from the encrypt side in controllers/settings/profile.js.
 import { decryptAccountNumber } from "../utils/accountCrypto.js";
 import { sendEmail } from "../services/emailService.js";
-import { computeWalletBalances, roundCurrency, normalizeContributions } from "../utils/financial.js";
+import {
+    computeWalletBalances,
+    roundCurrency,
+    normalizeContributions,
+    computeWithdrawalEligibility,
+    computePendingWithdrawals,
+    PENDING_WITHDRAWAL_STATUSES,
+} from "../utils/financial.js";
 import { withdrawalRequestTemplate } from "../templates/withdrawalRequest.js";
 import { withdrawalApprovalRequestTemplate } from "../templates/admin/withdrawalApprovalRequest.js";
 import { withdrawalApprovedTemplate } from "../templates/withdrawalApproved.js";
 import { adminWithdrawalProcessedTemplate } from "../templates/admin/withdrwalrequestprocessed.js";
 import { listAdminEmails } from "../utils/requireAdmin.js";
+import {
+    notifyWithdrawalApproved,
+    notifyWithdrawalFailed,
+    notifyWithdrawalProcessed,
+    notifyWithdrawalRejected,
+    notifyWithdrawalRequested,
+} from "../utils/pushNotifications.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 
@@ -74,7 +88,9 @@ async function refreshWallet(walletId, collectionId) {
 // collection is the only number the UI and request validator should ever
 // compare against — it's the invariant that holds across cron runs, admin
 // approvals, and concurrent requests.
-const PENDING_WITHDRAWAL_STATUSES = ["pending", "processing"];
+//
+// The pending-status list is the canonical set from the engine
+// (PENDING_WITHDRAWAL_STATUSES, imported above) — no longer hardcoded here.
 
 async function sumPendingWithdrawals(collectionId, { excludeId = null } = {}) {
     let query = supabase
@@ -234,14 +250,14 @@ export const getEligibleCollections = async (req, res) => {
             // Compute the live balances from source of truth!
             const balances = computeWalletBalances(normalizedContribs, colWithdrawals);
 
-            // Compute pending withdrawals (status in "pending" or "processing")
-            const pendingReqs = roundCurrency(
-                colWithdrawals
-                    .filter((row) => PENDING_WITHDRAWAL_STATUSES.includes(String(row.status || "")))
-                    .reduce((sum, row) => sum + Number(row.amount || 0), 0)
+            // Pending withdrawal requests + strict withdrawable cap — delegated
+            // to the engine (identical math to the previous inline version:
+            // Σ pending/processing requests, then max(0, available − pending)).
+            const pendingReqs = computePendingWithdrawals(colWithdrawals);
+            const { cap } = computeWithdrawalEligibility(
+                { available: balances.availableBalance },
+                pendingReqs
             );
-
-            const cap = roundCurrency(Math.max(0, balances.availableBalance - pendingReqs));
 
             return {
                 ...c,
@@ -319,6 +335,10 @@ export const requestWithdrawal = async (req, res) => {
             const decrypted = decryptAccountNumber(payoutAccount.account_number_cipher);
             if (decrypted) {
                 accountNumber = decrypted;
+                console.log("[withdrawal] resolved payout account", {
+                    payout_account_id: payoutAccountId,
+                    user_id: userId,
+                });
             } else {
                 // Legacy unrecoverable ciphertext from the original Buffer-
                 // serialisation bug. We log the cipher shape (without the
@@ -553,6 +573,12 @@ export const requestWithdrawal = async (req, res) => {
             .eq("id", userId)
             .single();
 
+        await notifyWithdrawalRequested({
+            userId,
+            withdrawalId: insertedWithdrawal.id,
+            amount: withdrawalAmount,
+        });
+
         // Fire-and-forget email notifications
         (async () => {
             try {
@@ -693,6 +719,11 @@ export const handlePaystackWebhook = async (req, res) => {
 
             // Recompute balances from source of truth
             await refreshWallet(wallet.id, withdrawal.collection_id);
+            await notifyWithdrawalProcessed({
+                userId: withdrawal.user_id,
+                withdrawalId: withdrawal.id,
+                amount: withdrawal.amount,
+            });
 
         } else if (event === "transfer.failed" || event === "transfer.reversed") {
             const newStatus = event === "transfer.failed" ? "failed" : "reversed";
@@ -704,6 +735,12 @@ export const handlePaystackWebhook = async (req, res) => {
             // Refund available_balance since withdrawal won't proceed
             // Then recompute from source of truth
             await refreshWallet(wallet.id, withdrawal.collection_id);
+            await notifyWithdrawalFailed({
+                userId: withdrawal.user_id,
+                withdrawalId: withdrawal.id,
+                amount: withdrawal.amount,
+                status: newStatus,
+            });
         }
     }
 
@@ -850,6 +887,16 @@ export const approveWithdrawal = async (req, res) => {
     // Recompute all balances from source of truth
     const balances = await refreshWallet(wallet.id, withdrawal.collection_id);
 
+    // Approval is complete at this point. A push-provider outage must not
+    // turn this successful state transition into an HTTP 500 for the admin.
+    void notifyWithdrawalApproved({
+        userId: withdrawal.user_id,
+        withdrawalId: withdrawal.id,
+        amount: withdrawal.amount,
+    }).catch((err) => {
+        console.error("Withdrawal approved push notification failed:", err?.message || err);
+    });
+
     // Fire-and-forget email notifications
     (async () => {
         try {
@@ -958,6 +1005,12 @@ export const rejectWithdrawal = async (req, res) => {
         .from("withdrawals")
         .update({ status: "rejected" })
         .eq("id", withdrawal.id);
+
+    await notifyWithdrawalRejected({
+        userId: withdrawal.user_id,
+        withdrawalId: withdrawal.id,
+        amount: withdrawal.amount,
+    });
 
     return res.status(200).json({ success: true, message: "Withdrawal rejected and available balance refunded successfully" });
 };

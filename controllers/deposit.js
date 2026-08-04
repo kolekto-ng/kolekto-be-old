@@ -4,6 +4,11 @@ import { createContribution } from "./contribution.js";
 import crypto from "node:crypto";
 import { sendEmail } from "../services/emailService.js";
 import { sendPaymentInitialize, sendPaymentConfirmation } from "../utils/emailHelper.js";
+import { contributionReceivedTemplate } from "../templates/emailTemplates.js";
+import {
+    notifyContributionByReference,
+    notifyPaymentIssue,
+} from "../utils/pushNotifications.js";
 import {
     calculateFees,
     computeWalletBalances,
@@ -11,6 +16,8 @@ import {
     normalizeContributions,
     deriveNetContribution,
 } from "../utils/financial.js";
+import { resolveContributionUniqueCode, shouldGenerateUniqueCode } from "../utils/contributionCodeService.js";
+import { normalizePhone } from "../utils/normalizePhone.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.replace(/['"\r\n\s]/g, "");
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
@@ -28,8 +35,26 @@ const PAYSTACK_BASE_URL = "https://api.paystack.co";
  * Returns { ok: boolean, status: number, body: any }.
  *
  * Exported so the F5 admin reconcile endpoint can reuse the same code path.
+ *
+ * @param {string} reference
+ * @param {string|null} [overrideCollectionId] - Manual recovery hint, only
+ *   used by the edge function when automatic metadata resolution (the
+ *   pending_payment_context row + Paystack's own metadata) both fail to
+ *   produce a collectionId. Supplied by an admin via Admin Reconcile after
+ *   confirming, out-of-band, which collection a stranded payment belongs to.
+ * @param {string|null} [overrideSelectedTierId] - Manual recovery hint for
+ *   `tiered` collections, for the rarer case where amount-based tier
+ *   inference is ambiguous. The admin panel's Reconcile form has always
+ *   collected this (see ReconcilePaymentPage.tsx) but it was silently
+ *   dropped here — never read off req.body, never forwarded. Fixed
+ *   alongside the invocationSource addition below since both touch this
+ *   same call site.
+ * @param {string|null} [invocationSource] - 'webhook' | 'admin_reconcile' |
+ *   'scheduled_recovery' | 'frontend_callback'. Optional — the edge function
+ *   infers a sensible default from the request shape if omitted, so existing
+ *   callers that don't pass this keep working identically.
  */
-export async function invokeVerifyEdgeFunction(reference) {
+export async function invokeVerifyEdgeFunction(reference, overrideCollectionId = null, overrideSelectedTierId = null, invocationSource = null) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey =
         process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -53,10 +78,15 @@ export async function invokeVerifyEdgeFunction(reference) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 25000);
 
+    const body = { reference };
+    if (overrideCollectionId) body.overrideCollectionId = overrideCollectionId;
+    if (overrideSelectedTierId) body.overrideSelectedTierId = overrideSelectedTierId;
+    if (invocationSource) body.invocationSource = invocationSource;
+
     try {
         const res = await axios.post(
             url,
-            { reference },
+            body,
             {
                 headers: {
                     Authorization: `Bearer ${supabaseKey}`,
@@ -85,82 +115,6 @@ export async function invokeVerifyEdgeFunction(reference) {
         };
     } finally {
         clearTimeout(timeoutId);
-    }
-}
-
-/**
- * B-3: Mint the next contributor unique code atomically.
- *
- * Primary path: call the Postgres RPC `next_contributor_code_number`
- * (see database/b3_contributor_code_sequence.sql). The RPC is a single
- * UPDATE … RETURNING statement, which Postgres serialises automatically —
- * two concurrent calls cannot produce the same number.
- *
- * Fallback path (RPC not yet deployed): use MAX(numeric_suffix)+1 instead
- * of the previous COUNT(*)+1. This is still racy but far less likely to
- * collide because we look at the largest existing suffix instead of the
- * row count, and it lets the code ship before the SQL migration is run.
- * A clear console.warn is logged when the fallback fires so ops can see
- * the migration hasn't been applied.
- *
- * Returns: padded numeric string (e.g. "001", "042", "1234"). The caller
- * prefixes it with collection.code_prefix.
- */
-async function nextContributorCodeNumber(collectionId, codePrefix) {
-    // Primary: atomic RPC
-    try {
-        const { data, error } = await supabase
-            .rpc("next_contributor_code_number", { p_collection_id: collectionId });
-        if (!error && data != null) {
-            const num = typeof data === "number"
-                ? data
-                : Array.isArray(data) && data.length > 0
-                    ? Number(data[0]?.next_contributor_code_number ?? data[0])
-                    : Number(data);
-            if (Number.isFinite(num) && num > 0) {
-                return String(num).padStart(3, "0");
-            }
-        }
-        if (error) {
-            console.warn(
-                "[nextContributorCodeNumber] RPC not available — falling back to MAX+1. " +
-                "Apply database/b3_contributor_code_sequence.sql to remove this fallback.",
-                { code: error.code, message: error.message }
-            );
-        }
-    } catch (rpcErr) {
-        console.warn(
-            "[nextContributorCodeNumber] RPC threw — falling back to MAX+1:",
-            rpcErr?.message
-        );
-    }
-
-    // Fallback: derive the next number from the largest existing suffix that
-    // matches this collection's code_prefix. Still racy under concurrent
-    // writes but better than COUNT(*)+1, and ONLY runs if the RPC is missing.
-    try {
-        const { data: rows } = await supabase
-            .from("contributions")
-            .select("contributor_unique_code")
-            .eq("collection_id", collectionId)
-            .not("contributor_unique_code", "is", null);
-        let maxNum = 0;
-        const prefix = String(codePrefix || "");
-        for (const r of rows || []) {
-            const code = String(r.contributor_unique_code || "");
-            const tail = prefix && code.startsWith(prefix) ? code.slice(prefix.length) : code;
-            const n = parseInt(tail, 10);
-            if (Number.isFinite(n) && n > maxNum) maxNum = n;
-        }
-        return String(maxNum + 1).padStart(3, "0");
-    } catch (fallbackErr) {
-        console.error(
-            "[nextContributorCodeNumber] both RPC and fallback failed:",
-            fallbackErr?.message
-        );
-        // Last resort: timestamp-based so we still produce a unique-looking
-        // code rather than skipping the field entirely.
-        return String(Date.now() % 100000).padStart(5, "0");
     }
 }
 
@@ -518,7 +472,9 @@ export const initializePayment = async (req, res) => {
                     collection_id: collectionId,
                     name: fullName,
                     email,
-                    phone: phoneNumber,
+                    // Normalize to guarantee contributions.phone (varchar(20)) can
+                    // never overflow — see utils/normalizePhone.js.
+                    phone: normalizePhone(phoneNumber),
                     amount: netAmount,  // ALWAYS the net contribution (Total Raised tracks this)
                     contributor_information: Object.keys(infoEntry).length ? [infoEntry] : [],
                     status: "pending",
@@ -559,38 +515,8 @@ export const initializePayment = async (req, res) => {
 
         const paystackData = paystackRes.data.data;
 
-        // ── Get wallet ───────────────────────────────────────────────────────
-        const { data: wallet } = await supabase
-            .from("wallets")
-            .select("id")
-            .eq("collection_id", collectionId)
-            .single();
-
-        // ── Insert deposit record ────────────────────────────────────────────
-        const { data: payment, error: paymentError } = await supabase
-            .from("deposits")
-            .insert([{
-                full_name: fullName,
-                email,
-                amount: totalPayable, // what Paystack charged
-                phone_number: phoneNumber,
-                currency: "NGN",
-                status: "pending",
-                payment_reference: paystackData.reference,
-                authorization_url: paystackData.authorization_url,
-                contributor_id: contributorId,
-                wallet_id: wallet?.id || null,
-                collection_id: collectionId,
-                init_email_sent: false,
-                contributor_confirmed_sent: false,
-                organizer_notified_sent: false,
-            }])
-            .select()
-            .single();
-
-        if (paymentError) {
-            return res.status(500).json({ error: "Failed to create payment record" });
-        }
+        // Tier 1: the legacy `deposits` record was removed. The contribution
+        // (created above) is the payment source of truth; verification reads it.
 
         // ── Send init email (fire-and-forget) ────────────────────────────────
         try {
@@ -609,10 +535,6 @@ export const initializePayment = async (req, res) => {
                 [{ id: contributorId, details, uniqueCode: null }],
                 new Date().toISOString()
             );
-            await supabase
-                .from("deposits")
-                .update({ init_email_sent: true, updated_at: new Date().toISOString() })
-                .eq("id", payment.id);
         } catch (err) {
             console.error("Init email error:", err?.message || err);
         }
@@ -628,18 +550,6 @@ export const initializePayment = async (req, res) => {
             authorization_url: paystackData.authorization_url, // both formats
             reference: paystackData.reference,
         });
-
-        // Background: link deposit → contribution
-        (async () => {
-            try {
-                await supabase
-                    .from("contributions")
-                    .update({ payment_id: payment.id })
-                    .eq("id", contributorId);
-            } catch (err) {
-                console.error("Background link error:", err.message);
-            }
-        })();
     } catch (error) {
         console.error("[initializePayment] CAUGHT ERROR:", error?.message, error?.code, error?.response?.data);
         return res.status(500).json({
@@ -671,13 +581,11 @@ export const verifyPayment = async (req, res) => {
     // F4: correlation log
     console.log(`[verify-be ref=${reference}] VERIFY_CALLED`);
 
-    const { data: existingDeposit, error: fetchError } = await supabase
-        .from("deposits")
-        .select("*")
-        .eq("payment_reference", reference)
-        .single();
-
-    if (fetchError || !existingDeposit) {
+    // Canonical verify: the payment source of truth is `contributions` (written
+    // by the edge initiate/verify path). Verify with Paystack and read the
+    // contribution. The legacy `deposits` lookup was removed in Tier 1 — it was
+    // always empty and never on the live path.
+    {
         // ── Fallback: payment was initiated via Supabase Edge Function, so no
         // deposits record exists. Verify directly with Paystack and read from
         // the contributions table (which the edge function always writes to).
@@ -740,7 +648,7 @@ export const verifyPayment = async (req, res) => {
                 campaignSummary: collection.campaign_summary || "",
                 bannerUrl: collection.banner_url || collection.banner_image || "",
                 eventDate: collection.event_date || "",
-                uniqueIdEnabled: Boolean(collection.unique_id_enabled),
+                uniqueIdEnabled: shouldGenerateUniqueCode(collection),
                 codePrefix: collection.code_prefix || "",
                 contributionAmount: fallbackNetAmount,
                 platformFee: fbPlatformFee,
@@ -774,7 +682,7 @@ export const verifyPayment = async (req, res) => {
                     tx.channel,
                     fallbackParticipants,
                     `${process.env.FRONTEND_URL}/payment/verify?reference=${reference}`,
-                    collection.title
+                    null
                 ).catch((err) =>
                     console.error("[verifyPayment fallback] email error:", err?.message || err)
                 );
@@ -790,376 +698,6 @@ export const verifyPayment = async (req, res) => {
         }
     }
 
-    // Already successful — return cached data and resend confirmation if needed
-    if (existingDeposit.status === "success") {
-        // F4: hit the idempotent path
-        console.log(`[verify-be ref=${reference}] VERIFY_IDEMPOTENT_HIT depositId=${existingDeposit.id}`);
-        const [{ data: contributor }, { data: collection }] = await Promise.all([
-            supabase
-                .from("contributions")
-                .select("*")
-                .eq("id", existingDeposit.contributor_id)
-                .single(),
-            supabase
-                .from("collections")
-                .select("*")
-                .eq("id", existingDeposit.collection_id)
-                .single(),
-        ]);
-
-        const participants = [
-            {
-                id: contributor?.id,
-                uniqueCode: contributor?.contributor_unique_code || null,
-                details: formatDetails(contributor?.contributor_information),
-            },
-        ];
-
-        // Build fee breakdown for receipt
-        const existingCollType = collection?.collection_type || collection?.type || "fixed";
-        const existingFeeBearer = collection?.fee_bearer || "organizer";
-        const existingNetAmount = contributor?.amount || existingDeposit.amount;
-        const existingTotalPaid = existingDeposit.amount;
-        const { platformFee: exPlatformFee, gatewayFee: exGatewayFee } =
-            calculateFees(existingNetAmount, existingCollType, existingFeeBearer);
-        const existingTotalFees = roundCurrency(existingTotalPaid - existingNetAmount);
-        const existingTicketSelections =
-            contributor?.contributor_information?.[0]?._ticketSelections || [];
-
-        const receiptData = {
-            collectionTitle: collection?.title || "",
-            collectionType: collection?.collection_type || collection?.type || "fixed",
-            description: collection?.description || "",
-            campaignSummary: collection?.campaign_summary || "",
-            bannerUrl: collection?.banner_url || collection?.banner_image || "",
-            eventDate: collection?.event_date || "",
-            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
-            codePrefix: collection?.code_prefix || "",
-            contributionAmount: existingNetAmount,
-            platformFee: exPlatformFee,
-            gatewayFee: exGatewayFee,
-            totalFees: existingTotalFees > 0 ? existingTotalFees : 0,
-            totalPaid: existingTotalPaid,
-            participants,
-            ticketSelections: existingTicketSelections,
-            transactionRef: existingDeposit.payment_reference,
-            status: existingDeposit.status,
-            paidAt: existingDeposit.paid_at,
-            channel: existingDeposit.channel,
-            currency: existingDeposit.currency,
-            payer: {
-                name: existingDeposit.full_name,
-                email: existingDeposit.email,
-                phone: existingDeposit.phone_number,
-            },
-        };
-
-        // Resend confirmation email exactly once
-        try {
-            const { data: contributorUpdated } = await supabase
-                .from("deposits")
-                .update({
-                    contributor_confirmed_sent: true,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("payment_reference", existingDeposit.payment_reference)
-                .eq("contributor_confirmed_sent", false)
-                .select()
-                .single();
-
-            if (contributorUpdated) {
-                const receiptUrl = `${process.env.FRONTEND_URL}/receipts/${existingDeposit.id}`;
-                await sendPaymentConfirmation(
-                    existingDeposit.email,
-                    existingDeposit.full_name,
-                    collection?.title,
-                    existingDeposit.amount,
-                    existingDeposit.currency,
-                    existingDeposit.payment_reference,
-                    existingDeposit.paid_at,
-                    existingDeposit.channel,
-                    participants,
-                    receiptUrl,
-                    collection?.title
-                );
-            }
-        } catch (e) {
-            console.error("Contributor confirmation update error:", e?.message || e);
-        }
-
-        return res.status(200).json({
-            message: "Payment already verified",
-            payment: existingDeposit,
-            contributor,
-            collection,
-            receiptData,
-        });
-    }
-
-    try {
-        const response = await axios.get(
-            `${PAYSTACK_BASE_URL}/transaction/verify/${reference}`,
-            { headers: paystackHeaders }
-        );
-
-        const paystackData = response.data.data;
-        // F4: Paystack verification outcome
-        console.log(
-            `[verify-be ref=${reference}] VERIFY_PAYSTACK_RESULT status=${paystackData?.status} amount=${paystackData?.amount}`
-        );
-
-        const { data: deposit, error: depositError } = await supabase
-            .from("deposits")
-            .update({
-                status: paystackData.status,
-                paid_at: paystackData.paid_at ? new Date(paystackData.paid_at) : null,
-                channel: paystackData.channel || null,
-                currency: paystackData.currency || null,
-                updated_at: new Date(),
-            })
-            .eq("payment_reference", reference)
-            .select()
-            .single();
-
-        if (depositError) {
-            return res.status(500).json({ error: depositError.message });
-        }
-
-        if (deposit && deposit.contributor_id && paystackData.status === "success") {
-            // ── Step 1: Mark contribution as PAID first (wallet stats depend on this) ──
-            const { data: collection } = await supabase
-                .from("collections")
-                .select("code_prefix, collection_type, fee_bearer")
-                .eq("id", deposit.collection_id)
-                .single();
-
-            const netAmount = deriveNetContribution(
-                deposit.amount,
-                collection?.collection_type || "fixed",
-                collection?.fee_bearer || "organizer"
-            );
-
-            // B-3: atomic per-collection counter via the Postgres RPC.
-            if (collection?.code_prefix) {
-                const nextNumber = await nextContributorCodeNumber(
-                    deposit.collection_id,
-                    collection.code_prefix
-                );
-                const uniqueCode = `${collection.code_prefix}${nextNumber}`;
-                await supabase
-                    .from("contributions")
-                    .update({
-                        status: "paid",
-                        contributor_unique_code: uniqueCode,
-                        payment_reference: deposit.payment_reference,
-                        amount: netAmount,
-                        gross_amount: deposit.amount,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("id", deposit.contributor_id);
-            } else {
-                await supabase
-                    .from("contributions")
-                    .update({
-                        status: "paid",
-                        payment_reference: deposit.payment_reference,
-                        amount: netAmount,
-                        gross_amount: deposit.amount,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("id", deposit.contributor_id);
-            }
-
-            // ── Step 2: Update wallet AFTER contribution is marked paid ──────────
-            if (deposit.collection_id && deposit.amount > 0) {
-                await updateWalletStats(deposit.collection_id, deposit.amount);
-                // F4: wallet recompute checkpoint
-                console.log(
-                    `[verify-be ref=${reference}] WALLET_UPDATED collectionId=${deposit.collection_id}`
-                );
-            }
-
-            // Send contributor confirmation exactly once
-            try {
-                const { data: contributorUpdated } = await supabase
-                    .from("deposits")
-                    .update({
-                        contributor_confirmed_sent: true,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("payment_reference", reference)
-                    .eq("contributor_confirmed_sent", false)
-                    .select()
-                    .single();
-
-                if (contributorUpdated) {
-                    const { data: profile } = await supabase
-                        .from("profiles")
-                        .select("id, full_name, email")
-                        .eq("id", deposit.contributor_id)
-                        .single();
-
-                    const { data: contributor } = await supabase
-                        .from("contributions")
-                        .select("*")
-                        .eq("id", deposit.contributor_id)
-                        .single();
-
-                    const { data: coll } = await supabase
-                        .from("collections")
-                        .select("title")
-                        .eq("id", deposit.collection_id)
-                        .single();
-
-                    const recipient = profile?.email || deposit.email;
-                    const receiptUrl = `${process.env.FRONTEND_URL}/receipts/${deposit.id}`;
-                    const participants = [
-                        {
-                            id: contributor?.id,
-                            uniqueCode: contributor?.contributor_unique_code || null,
-                            details: formatDetails(contributor?.contributor_information),
-                        },
-                    ];
-
-                    await sendPaymentConfirmation(
-                        recipient,
-                        profile?.full_name || deposit.full_name,
-                        coll?.title,
-                        deposit.amount,
-                        deposit.currency,
-                        deposit.payment_reference,
-                        deposit.paid_at,
-                        deposit.channel,
-                        participants,
-                        receiptUrl,
-                        coll?.title
-                    ).catch((err) =>
-                        console.error("Contributor email send error:", err?.message || err)
-                    );
-                }
-            } catch (e) {
-                console.error("Contributor confirmation update error:", e?.message || e);
-            }
-
-            // Notify organizer exactly once
-            try {
-                const { data: organizerUpdated } = await supabase
-                    .from("deposits")
-                    .update({
-                        organizer_notified_sent: true,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("payment_reference", reference)
-                    .eq("organizer_notified_sent", false)
-                    .select()
-                    .single();
-
-                if (organizerUpdated) {
-                    const { data: coll } = await supabase
-                        .from("collections")
-                        .select("id, title, user_id")
-                        .eq("id", deposit.collection_id)
-                        .single();
-
-                    const { data: organizer } = await supabase
-                        .from("profiles")
-                        .select("id, full_name, email")
-                        .eq("id", coll?.user_id)
-                        .single();
-
-                    await sendEmail({
-                        to: organizer?.email,
-                        subject: `Incoming Payment - ${coll?.title}`,
-                        html: `<p>Hi ${organizer?.full_name}, you have received a payment of ${deposit.amount} ${deposit.currency} for "${coll?.title}". Reference: ${deposit.payment_reference}</p>`,
-                    }).catch((err) =>
-                        console.error("Organizer email send error:", err?.message || err)
-                    );
-                }
-            } catch (e) {
-                console.error("Organizer notification update error:", e?.message || e);
-            }
-        }
-
-        const [{ data: contributor }, { data: collection }] = await Promise.all([
-            supabase
-                .from("contributions")
-                .select("*")
-                .eq("id", deposit.contributor_id)
-                .single(),
-            supabase
-                .from("collections")
-                .select("*")
-                .eq("id", deposit.collection_id)
-                .single(),
-        ]);
-
-        const participants = [
-            {
-                id: contributor?.id,
-                uniqueCode: contributor?.contributor_unique_code || null,
-                details: formatDetails(contributor?.contributor_information),
-            },
-        ];
-
-        // Build fee breakdown for receipt
-        const verCollType = collection?.collection_type || collection?.type || "fixed";
-        const verFeeBearer = collection?.fee_bearer || "organizer";
-        const verNetAmount = contributor?.amount || deposit.amount;
-        const verTotalPaid = deposit.amount;
-        const { platformFee: verPlatformFee, gatewayFee: verGatewayFee } =
-            calculateFees(verNetAmount, verCollType, verFeeBearer);
-        const verTotalFees = roundCurrency(verTotalPaid - verNetAmount);
-        const verTicketSelections =
-            contributor?.contributor_information?.[0]?._ticketSelections || [];
-
-        const receiptData = {
-            collectionTitle: collection?.title || "",
-            collectionType: collection?.collection_type || collection?.type || "fixed",
-            description: collection?.description || "",
-            campaignSummary: collection?.campaign_summary || "",
-            bannerUrl: collection?.banner_url || collection?.banner_image || "",
-            eventDate: collection?.event_date || "",
-            uniqueIdEnabled: Boolean(collection?.unique_id_enabled),
-            codePrefix: collection?.code_prefix || "",
-            contributionAmount: verNetAmount,
-            platformFee: verPlatformFee,
-            gatewayFee: verGatewayFee,
-            totalFees: verTotalFees > 0 ? verTotalFees : 0,
-            totalPaid: verTotalPaid,
-            participants,
-            ticketSelections: verTicketSelections,
-            transactionRef: deposit.payment_reference,
-            status: deposit.status,
-            paidAt: deposit.paid_at,
-            channel: deposit.channel,
-            currency: deposit.currency,
-            payer: {
-                name: deposit.full_name,
-                email: deposit.email,
-                phone: deposit.phone_number,
-            },
-        };
-
-        // F4: lifecycle complete
-        console.log(`[verify-be ref=${reference}] PAYMENT_COMPLETED`);
-
-        return res.status(200).json({
-            message: "Payment verification complete",
-            payment: deposit,
-            contributor,
-            collection,
-            receiptData,
-            paystack: paystackData,
-        });
-    } catch (error) {
-        console.error(`[verify-be ref=${reference}] VERIFY_ERROR`, {
-            message: error?.message,
-            code: error?.code,
-        });
-        return res
-            .status(500)
-            .json({ error: error.response?.data?.message || error.message });
-    }
 };
 
 // List all Paystack transactions
@@ -1257,6 +795,26 @@ async function verifyPaystackSignature(req) {
     return hashHex === signature;
 }
 
+async function notifyOrganizerPushForReference(reference, source) {
+    if (!reference) return { sent: 0, skipped: true };
+
+    try {
+        const result = await notifyContributionByReference(reference);
+        console.log(`[webhook ref=${reference}] ORGANIZER_PUSH_${source}`, {
+            sent: result?.sent || 0,
+            duplicate: Boolean(result?.duplicate),
+            skipped: Boolean(result?.skipped),
+            error: result?.error?.message || null,
+        });
+        return result;
+    } catch (error) {
+        console.error(`[webhook ref=${reference}] ORGANIZER_PUSH_${source}_FAILED`, {
+            message: error?.message || error,
+        });
+        return { sent: 0, error };
+    }
+}
+
 // Handle Paystack webhook
 export const handleWebhook = async (req, res) => {
     // We expect a raw Buffer here (see app.js wiring). Parse defensively so a
@@ -1304,6 +862,7 @@ export const handleWebhook = async (req, res) => {
                     console.log(
                         `[webhook ref=${reference}] WEBHOOK_ALREADY_PROCESSED — contribution already paid, no-op`
                     );
+                    await notifyOrganizerPushForReference(reference, "ALREADY_PAID");
                     return res
                         .status(200)
                         .send("Already processed");
@@ -1316,35 +875,34 @@ export const handleWebhook = async (req, res) => {
             );
         }
 
-        // ─── F1: Safety-net check #2 ─────────────────────────────────────────
-        // Try the legacy deposits-table path. This preserves behaviour for any
-        // payment initiated through controllers/deposit.js#initializePayment
-        // (which DOES create a deposits row before calling Paystack).
-        const { data: deposit, error: depositError } = await supabase
-            .from("deposits")
-            .select("*")
-            .eq("payment_reference", reference)
-            .single();
-
-        // ─── F1: Safety-net check #3 (RECOVERY) ──────────────────────────────
-        // No contributions, no deposit. This means the payment was initiated
-        // via the Supabase edge function `initiate-paystack-payment` AND the
-        // FE callback never reached `verify-paystack-payment` (closed tab,
-        // mobile browser killed, network glitch on return from Paystack).
-        // The contributor's money is at Paystack with no Kolekto-side record.
-        //
-        // We invoke the verify edge function directly — it's idempotent and
-        // identical to the FE path. This is the actual safety net that was
-        // missing before F1.
-        if (depositError || !deposit) {
+        // ─── Recovery: no PAID contribution exists yet. The canonical payment
+        // source of truth is `contributions`; invoke the idempotent verify edge
+        // function to record/settle the payment. (The legacy `deposits` lookup
+        // was removed in Tier 1 — it was always empty and never on the live path.)
+        {
+            // D-1 diagnostic: the webhook payload carries its OWN copy of
+            // metadata, separate from what the edge function fetches via
+            // /transaction/verify. Logging its shape here (never the values
+            // beyond type/keys) lets a future investigation compare whether
+            // Paystack's webhook and verify-API ever disagree on metadata
+            // shape for the same reference — useful if "Missing collection
+            // ID" recurs after the D-1 fix in verify-paystack-payment.
+            console.log(`[webhook ref=${reference}] WEBHOOK_METADATA_DIAGNOSTIC`, {
+                rawMetadataType: typeof event.data?.metadata,
+                metadataKeys:
+                    event.data?.metadata && typeof event.data.metadata === "object"
+                        ? Object.keys(event.data.metadata)
+                        : null,
+            });
             console.log(
                 `[webhook ref=${reference}] WEBHOOK_INVOKED_VERIFY — no contributions or deposits row exists; recovering via edge function`
             );
-            const invokeResult = await invokeVerifyEdgeFunction(reference);
+            const invokeResult = await invokeVerifyEdgeFunction(reference, null, null, "webhook");
             if (invokeResult.ok) {
                 console.log(
                     `[webhook ref=${reference}] WEBHOOK_VERIFY_RECOVERED status=${invokeResult.status}`
                 );
+                await notifyOrganizerPushForReference(reference, "VERIFY_RECOVERED");
                 return res.status(200).send("Recovered via edge function");
             }
             // Return 500 so Paystack retries — the edge function may have
@@ -1364,187 +922,6 @@ export const handleWebhook = async (req, res) => {
             });
         }
 
-        // Already processed check happens AFTER we update the deposit.
-        // This prevents the edge case where verifyPayment ran first (setting
-        // deposit.status = "success"), causing the webhook to skip updateWalletStats.
-        const alreadyProcessed = deposit.status === "success";
-
-        if (!alreadyProcessed) {
-            await supabase
-                .from("deposits")
-                .update({
-                    paid_at: event.data.paid_at ? new Date(event.data.paid_at) : new Date(),
-                    channel: event.data.channel || null,
-                    currency: event.data.currency || "NGN",
-                    status: event.data.status,
-                    updated_at: new Date(),
-                })
-                .eq("id", deposit.id);
-        }
-
-        // Guard with !alreadyProcessed: prevents re-running nextContributorCodeNumber
-        // on Paystack retries, which would generate and overwrite the unique code.
-        if (!alreadyProcessed && deposit.contributor_id) {
-            // ── Step 1: Mark contribution PAID (wallet depends on this) ──────
-            const { data: collection } = await supabase
-                .from("collections")
-                .select("code_prefix, collection_type, fee_bearer")
-                .eq("id", deposit.collection_id)
-                .single();
-
-            const netAmount = deriveNetContribution(
-                deposit.amount,
-                collection?.collection_type || "fixed",
-                collection?.fee_bearer || "organizer"
-            );
-
-            // B-3: atomic per-collection counter via the Postgres RPC.
-            if (collection?.code_prefix) {
-                const nextNumber = await nextContributorCodeNumber(
-                    deposit.collection_id,
-                    collection.code_prefix
-                );
-                const uniqueCode = `${collection.code_prefix}${nextNumber}`;
-                await supabase
-                    .from("contributions")
-                    .update({
-                        status: "paid",
-                        contributor_unique_code: uniqueCode,
-                        payment_reference: deposit.payment_reference,
-                        amount: netAmount,
-                        gross_amount: deposit.amount,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("id", deposit.contributor_id);
-            } else {
-                await supabase
-                    .from("contributions")
-                    .update({
-                        status: "paid",
-                        payment_reference: deposit.payment_reference,
-                        amount: netAmount,
-                        gross_amount: deposit.amount,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("id", deposit.contributor_id);
-            }
-        }
-
-        // ── Step 2: Update wallet AFTER contribution is marked paid ──────────
-        await updateWalletStats(deposit.collection_id, deposit.amount);
-
-        if (alreadyProcessed) {
-            console.log("Deposit already processed by verifyPayment — wallet re-synced:", reference);
-            return res.status(200).send("Already processed — wallet re-synced");
-        }
-
-        // Send contributor confirmation exactly once
-        try {
-            const { data: contributorUpdated } = await supabase
-                .from("deposits")
-                .update({
-                    contributor_confirmed_sent: true,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("payment_reference", reference)
-                .eq("contributor_confirmed_sent", false)
-                .select()
-                .single();
-
-            if (contributorUpdated) {
-                const { data: profile } = await supabase
-                    .from("profiles")
-                    .select("id, full_name, email")
-                    .eq("id", deposit.contributor_id)
-                    .single();
-
-                const { data: contributor } = await supabase
-                    .from("contributions")
-                    .select("*")
-                    .eq("id", deposit.contributor_id)
-                    .single();
-
-                const { data: collection } = await supabase
-                    .from("collections")
-                    .select("title")
-                    .eq("id", deposit.collection_id)
-                    .single();
-
-                const recipient = profile?.email || deposit.email;
-                const receiptUrl = `${process.env.FRONTEND_URL}/receipts/${deposit.id}`;
-                const participants = [
-                    {
-                        id: contributor?.id,
-                        uniqueCode: contributor?.contributor_unique_code || null,
-                        details: formatDetails(contributor?.contributor_information),
-                    },
-                ];
-
-                await sendPaymentConfirmation(
-                    recipient,
-                    profile?.full_name || deposit.full_name,
-                    collection?.title,
-                    deposit.amount,
-                    deposit.currency,
-                    deposit.payment_reference,
-                    deposit.paid_at,
-                    deposit.channel,
-                    participants,
-                    receiptUrl,
-                    collection?.title
-                ).catch((err) =>
-                    console.error("Contributor email send error:", err?.message || err)
-                );
-            }
-        } catch (e) {
-            console.error("Contributor confirmation update error:", e?.message || e);
-        }
-
-        // Notify organizer exactly once
-        try {
-            const { data: organizerUpdated } = await supabase
-                .from("deposits")
-                .update({
-                    organizer_notified_sent: true,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("payment_reference", reference)
-                .eq("organizer_notified_sent", false)
-                .select()
-                .single();
-
-            if (organizerUpdated) {
-                const { data: collection } = await supabase
-                    .from("collections")
-                    .select("id, title, user_id")   // FIXED: was organizer_id (column does not exist)
-                    .eq("id", deposit.collection_id)
-                    .single();
-
-                const { data: organizer } = await supabase
-                    .from("profiles")
-                    .select("id, full_name, email")
-                    .eq("id", collection?.user_id)   // FIXED: was organizer_id
-                    .single();
-
-                await sendEmail({
-                    to: organizer?.email,
-                    subject: `Incoming Payment - ${collection?.title}`,
-                    html: `<p>Hi ${organizer?.full_name}, you have received a payment of ${deposit.amount} ${deposit.currency} for "${collection?.title}". Reference: ${deposit.payment_reference}</p>`,
-                }).catch((err) =>
-                    console.error("Organizer email send error:", err?.message || err)
-                );
-            }
-        } catch (e) {
-            console.error("Organizer notification update error:", e?.message || e);
-        }
-
-        // F4: legacy deposits path completed
-        console.log(
-            `[webhook ref=${reference}] WEBHOOK_LEGACY_PROCESSED collectionId=${deposit.collection_id} amount=${deposit.amount}`
-        );
-
-        // ← 200 is now INSIDE the try block — always reached if no throw
-        return res.status(200).send("Webhook received");
 
         } catch (whErr) {
             // Catch-all for the entire charge.success processing path.
@@ -1598,6 +975,16 @@ export const sendReceiptNotification = async (req, res) => {
         channel = "card",
         participants = [],
         collectionId,
+        // Premium-receipt fields (sent by the edge function; all optional so the
+        // template degrades gracefully if an older caller omits them).
+        collectionType,
+        collectionDescription,
+        contributionAmount,
+        platformFee,
+        gatewayFee,
+        transactionId,
+        organizerName,
+        uniqueCodes,
     } = req.body || {};
 
     if (!payerEmail || !collectionTitle || !transactionRef) {
@@ -1621,7 +1008,18 @@ export const sendReceiptNotification = async (req, res) => {
             channel,
             participants,
             `${process.env.FRONTEND_URL}/payment/verify?reference=${transactionRef}`,
-            collectionTitle
+            organizerName || null,
+            {
+                collectionType,
+                collectionDescription,
+                contributionAmount,
+                platformFee,
+                gatewayFee,
+                totalPaid,
+                transactionId,
+                organizerName: organizerName || undefined,
+                uniqueCodes,
+            }
         );
         console.log("[sendReceiptNotification] ✅ Contributor email sent to", payerEmail);
     } catch (err) {
@@ -1652,31 +1050,12 @@ export const sendReceiptNotification = async (req, res) => {
                     results.organizer = await sendEmail({
                         to: organizer.email,
                         subject: `New Payment Received — ${collectionTitle}`,
-                        html: `
-                          <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px;">
-                            <div style="background:linear-gradient(135deg,#1B5E20,#388E3C);padding:24px;border-radius:8px 8px 0 0;text-align:center;">
-                              <h1 style="color:#fff;margin:0;font-size:20px;">New Payment Received</h1>
-                            </div>
-                            <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
-                              <p style="color:#374151;margin:0 0 16px;">Hi <strong>${organizer.full_name || "there"}</strong>,</p>
-                              <p style="color:#4b5563;margin:0 0 24px;">You have received a new payment for <strong>${collectionTitle}</strong>.</p>
-                              <table style="width:100%;border-collapse:collapse;font-size:14px;">
-                                <tr style="border-bottom:1px solid #f3f4f6;">
-                                  <td style="padding:10px 0;color:#6b7280;">Payer</td>
-                                  <td style="padding:10px 0;color:#111827;font-weight:600;text-align:right;">${payerName || payerEmail}</td>
-                                </tr>
-                                <tr style="border-bottom:1px solid #f3f4f6;">
-                                  <td style="padding:10px 0;color:#6b7280;">Amount</td>
-                                  <td style="padding:10px 0;color:#16a34a;font-weight:700;font-size:16px;text-align:right;">${amountFormatted}</td>
-                                </tr>
-                                <tr>
-                                  <td style="padding:10px 0;color:#6b7280;">Reference</td>
-                                  <td style="padding:10px 0;color:#111827;font-family:monospace;text-align:right;">${transactionRef}</td>
-                                </tr>
-                              </table>
-                              <p style="color:#9ca3af;font-size:12px;margin:24px 0 0;text-align:center;">Kolekto · Secure group payments</p>
-                            </div>
-                          </div>`,
+                        html: contributionReceivedTemplate(
+                            organizer.full_name || "there",
+                            payerName || payerEmail,
+                            amountFormatted,
+                            collectionTitle
+                        ),
                     });
                     console.log("[sendReceiptNotification] ✅ Organizer email sent to", organizer.email);
                 }
@@ -1684,6 +1063,22 @@ export const sendReceiptNotification = async (req, res) => {
         } catch (err) {
             console.error("[sendReceiptNotification] ❌ Organizer email error:", err?.message);
         }
+    }
+
+    // ── Organizer + contributor PUSH ─────────────────────────────────────────
+    // The edge function (verify-paystack-payment) calls this endpoint on EVERY
+    // first-time confirmed payment, so it — not just the Paystack webhook — is a
+    // reliable trigger for the payment push. Relying only on the webhook means a
+    // misconfigured/blocked webhook URL silently kills ALL payment pushes even
+    // though payments, wallets and emails are fine. This call is fully
+    // idempotent: notifyContributionByReference dedupes on
+    // `contribution-paid:<reference>` (organizer) and `contributor-paid:<reference>`
+    // (contributor), so the webhook also firing never produces a second push.
+    // Best-effort and non-blocking — a push failure must never fail the receipt.
+    if (transactionRef) {
+        await notifyOrganizerPushForReference(transactionRef, "SEND_RECEIPT").catch((err) =>
+            console.error("[sendReceiptNotification] ❌ Organizer push error:", err?.message || err)
+        );
     }
 
     return res.status(200).json({ success: true, results });

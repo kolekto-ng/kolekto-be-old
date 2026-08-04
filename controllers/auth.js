@@ -1,6 +1,66 @@
 import { supabase } from '../utils/client.js';
 import fetch from "node-fetch";
 import { verifyRecaptcha } from '../utils/recaptcha.js';
+
+function cleanString(value) {
+    return String(value || '').trim();
+}
+
+function normalizeAmbassadorCode(value) {
+    return cleanString(value).toUpperCase().replace(/[^A-Z]/g, '').slice(0, 6);
+}
+
+async function findAcceptedAmbassadorByCode(code) {
+    if (!code) return null;
+
+    const { data, error } = await supabase
+        .from('ambassador_profiles')
+        .select('id, full_name, ambassador_code, status')
+        .eq('ambassador_code', code)
+        .maybeSingle();
+
+    if (error) throw error;
+    if (!data || data.status !== 'accepted') return null;
+    return data;
+}
+
+async function attachOrganizerToAmbassador({ ambassador, organizer }) {
+    if (!ambassador?.id || !organizer?.id) return;
+
+    const { data: existing, error: lookupError } = await supabase
+        .from('ambassador_influenced_organizers')
+        .select('id')
+        .eq('organizer_id', organizer.id)
+        .maybeSingle();
+
+    if (lookupError) throw lookupError;
+
+    if (!existing) {
+        const { error: insertError } = await supabase
+            .from('ambassador_influenced_organizers')
+            .insert([{
+                ambassador_id: ambassador.id,
+                organizer_id: organizer.id,
+                organizer_name: organizer.fullName,
+                organizer_email: organizer.email,
+                status: 'active',
+            }]);
+
+        if (insertError) throw insertError;
+    }
+
+    const { error: profileError } = await supabase
+        .from('profiles')
+        .update({
+            referred_by_ambassador_id: ambassador.id,
+            ambassador_referral_code: ambassador.ambassador_code,
+        })
+        .eq('id', organizer.id);
+
+    if (profileError) {
+        console.warn('[ambassador referral] profile update failed:', profileError.message);
+    }
+}
 // Sign In
 export const signIn = async (req, res) => {
     const { email, password } = req.body;
@@ -75,7 +135,10 @@ export const signUp = async (req, res) => {
         recaptcherToken: token,
         recatcherType: type,
         emailRedirectTo,
+        ambassadorReferralCode,
+        ambassador_referral_code,
     } = req.body;
+    const referralCode = normalizeAmbassadorCode(ambassadorReferralCode || ambassador_referral_code);
 
     if (!email || !password || !firstName || !lastName || !phoneNumber) {
         return res.status(400).json({ error: "Email, password, first name and last name are required." });
@@ -115,6 +178,19 @@ export const signUp = async (req, res) => {
         res.status(500).json({ message: "Verification failed" });
     }
 
+    let referringAmbassador = null;
+    try {
+        if (referralCode) {
+            referringAmbassador = await findAcceptedAmbassadorByCode(referralCode);
+            if (!referringAmbassador) {
+                return res.status(400).json({ error: "Invalid ambassador referral code." });
+            }
+        }
+    } catch (err) {
+        console.error('[ambassador referral] lookup failed:', err);
+        return res.status(500).json({ error: "Could not validate ambassador referral code." });
+    }
+
     const { data, error } = await supabase.auth.signUp({
         email,
         password,
@@ -126,6 +202,7 @@ export const signUp = async (req, res) => {
                 first_name: firstName,
                 last_name: lastName,
                 full_name: `${firstName} ${lastName}`,
+                ambassador_referral_code: referringAmbassador?.ambassador_code || null,
 
             }
         }
@@ -133,6 +210,22 @@ export const signUp = async (req, res) => {
     if (error) {
         return res.status(400).json({ error: error.message });
     }
+
+    if (data?.user && referringAmbassador) {
+        try {
+            await attachOrganizerToAmbassador({
+                ambassador: referringAmbassador,
+                organizer: {
+                    id: data.user.id,
+                    fullName: `${firstName} ${lastName}`,
+                    email,
+                },
+            });
+        } catch (err) {
+            console.error('[ambassador referral] attach failed:', err);
+        }
+    }
+
     return res.status(201).json({
         user: data.user,
         session: data.session || null,
