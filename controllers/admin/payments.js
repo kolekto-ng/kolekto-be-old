@@ -15,9 +15,30 @@
 
 import { invokeVerifyEdgeFunction } from "../deposit.js";
 
+// Loose UUID check — just enough to reject obvious typos/garbage before
+// forwarding to the edge function. Not enforcing the exact Postgres uuid
+// grammar since that's the edge function's job.
+const UUID_LIKE = /^[0-9a-f-]{20,40}$/i;
+
 export const reconcilePayment = async (req, res) => {
     const adminEmail = req.user?.email || "(unknown)";
     const reference = String(req.body?.reference || "").trim();
+
+    // Manual recovery hint: only used by the edge function when automatic
+    // metadata resolution (pending_payment_context + Paystack's own
+    // metadata) both fail to produce a collectionId — e.g. the
+    // pending_payment_context insert silently failed AND Paystack lost/
+    // truncated the metadata. The admin confirms the right collection
+    // out-of-band (Paystack dashboard shows the contributor's email/amount/
+    // timestamp) and pastes its ID here.
+    const collectionId = String(req.body?.collectionId || "").trim() || null;
+
+    // Manual tier override — the admin Reconcile form (ReconcilePaymentPage.tsx)
+    // has always collected this ("Pricing tier ID" field) but it was never
+    // read here, so it silently never reached the edge function. Fixed:
+    // tier ids are organizer-defined (often timestamp-like), not UUIDs, so
+    // no format check beyond basic sanitization.
+    const selectedTierId = String(req.body?.selectedTierId || "").trim() || null;
 
     if (!reference) {
         return res.status(400).json({
@@ -38,11 +59,20 @@ export const reconcilePayment = async (req, res) => {
         });
     }
 
+    if (collectionId && !UUID_LIKE.test(collectionId)) {
+        return res.status(400).json({
+            error: "Collection ID looks malformed.",
+            code: "INVALID_COLLECTION_ID",
+        });
+    }
+
     console.log(
-        `[reconcile ref=${reference}] RECONCILE_REQUESTED by admin=${adminEmail}`
+        `[reconcile ref=${reference}] RECONCILE_REQUESTED by admin=${adminEmail}` +
+            (collectionId ? ` collectionIdOverride=${collectionId}` : "") +
+            (selectedTierId ? ` selectedTierIdOverride=${selectedTierId}` : "")
     );
 
-    const result = await invokeVerifyEdgeFunction(reference);
+    const result = await invokeVerifyEdgeFunction(reference, collectionId, selectedTierId, "admin_reconcile");
 
     if (result.ok) {
         console.log(

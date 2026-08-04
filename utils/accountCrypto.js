@@ -248,3 +248,40 @@ export function decryptAccountNumber(cipherValue) {
     }
     return null;
 }
+
+// Convenience boolean check used when deciding which saved account is safe
+// to default to. Never logs or returns the plaintext.
+export function isAccountCipherDecryptable(cipherValue) {
+    return decryptAccountNumber(cipherValue) !== null;
+}
+
+// Safe shape diagnostics for support/debugging — never includes the cipher
+// bytes or any decrypted plaintext, only metadata about the storage shape.
+// Used by scripts/auditPayoutAccounts.js and ad-hoc production debugging to
+// answer "what format is Supabase actually returning?" without risking a
+// sensitive value ending up in logs.
+export function describeCipherShape(cipherValue) {
+    if (cipherValue == null) {
+        return { jsType: typeof cipherValue, shape: "null", length: 0, decryptable: false };
+    }
+    if (Buffer.isBuffer(cipherValue)) {
+        return { jsType: "object", shape: "Buffer", length: cipherValue.length, decryptable: isAccountCipherDecryptable(cipherValue) };
+    }
+    if (cipherValue instanceof Uint8Array) {
+        return { jsType: "object", shape: "Uint8Array", length: cipherValue.length, decryptable: isAccountCipherDecryptable(cipherValue) };
+    }
+    if (typeof cipherValue === "object") {
+        const shape = cipherValue.type === "Buffer" && Array.isArray(cipherValue.data)
+            ? "BufferJSON"
+            : "unknownObject";
+        return { jsType: "object", shape, length: Array.isArray(cipherValue?.data) ? cipherValue.data.length : null, decryptable: isAccountCipherDecryptable(cipherValue) };
+    }
+    if (typeof cipherValue === "string") {
+        let shape = "base64";
+        if (cipherValue.startsWith("\\x")) shape = "bytea-hex(\\x)";
+        else if (cipherValue.startsWith("0x")) shape = "hex(0x)";
+        else if (cipherValue.trim().startsWith("{")) shape = "jsonText";
+        return { jsType: "string", shape, length: cipherValue.length, decryptable: isAccountCipherDecryptable(cipherValue) };
+    }
+    return { jsType: typeof cipherValue, shape: "unknown", length: null, decryptable: false };
+}
