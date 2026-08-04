@@ -3,9 +3,10 @@ import axios from 'axios';
 
 const ZEPTOMAIL_API_URL = 'https://api.zeptomail.com/v1.1/email';
 
-// Create nodemailer transporter using ZeptoMail SMTP as fallback with 5s timeout.
-// Var names are kept as ZOHO_* (legacy) to avoid touching deployment config —
-// they now hold ZeptoMail SMTP host/credentials instead of Zoho's.
+// ZeptoMail REST API token (HTTPS — not blocked by cloud providers).
+const getApiToken = () => process.env.ZOHO_MAIL_PASS || process.env.ZOHO_APP_PASSWORD;
+
+// Nodemailer SMTP fallback transport with 5s timeout.
 const createTransporter = () => {
     return nodemailer.createTransport({
         host: process.env.ZOHO_SMTP_HOST || 'smtp.zeptomail.com',
@@ -25,10 +26,9 @@ const toAddressList = (value) => {
     return list.filter(Boolean).map(addr => ({ email_address: { address: addr.trim() } }));
 };
 
-// Send via ZeptoMail HTTP API (primary — avoids SMTP port blockers on cloud providers).
 const sendViaHttpApi = async ({ to, subject, html, text, from, cc, bcc }) => {
-    const apiKey = process.env.ZOHO_APP_PASSWORD;
-    if (!apiKey) throw new Error('ZOHO_APP_PASSWORD not configured');
+    const apiKey = getApiToken();
+    if (!apiKey) throw new Error('ZOHO_MAIL_PASS not configured');
 
     const payload = {
         from: { address: from || process.env.FROM_EMAIL || 'no-reply@kolekto.com.ng' },
@@ -52,7 +52,6 @@ const sendViaHttpApi = async ({ to, subject, html, text, from, cc, bcc }) => {
     return { success: true, messageId: response.data?.messageId, response: response.data };
 };
 
-// Send via ZeptoMail SMTP (fallback — with 5s timeout so cloud failures fail fast).
 const sendViaSmtp = async ({ to, subject, html, text, from, attachments, cc, bcc }) => {
     const transporter = createTransporter();
     const mailOptions = {
@@ -70,20 +69,15 @@ const sendViaSmtp = async ({ to, subject, html, text, from, attachments, cc, bcc
     return { success: true, messageId: info.messageId, response: info.response };
 };
 
-// Verify email configuration — checks ZeptoMail API key is present.
 export const verifyEmailConfig = async () => {
-    try {
-        const apiKey = process.env.ZOHO_APP_PASSWORD;
-        if (!apiKey) throw new Error('ZOHO_APP_PASSWORD not configured');
-        console.log('✅ ZeptoMail HTTP API key configured');
-        return true;
-    } catch (error) {
-        console.error('❌ Email service configuration error:', error);
+    if (!getApiToken()) {
+        console.error('❌ Email service not configured: ZOHO_MAIL_PASS missing');
         return false;
     }
+    console.log('✅ ZeptoMail HTTP API token configured');
+    return true;
 };
 
-// Send email — tries ZeptoMail HTTP API first; falls back to SMTP with 5s timeout.
 export const sendEmail = async ({ to, subject, html, text, from, attachments, cc, bcc }) => {
     try {
         if (attachments) {
@@ -112,14 +106,12 @@ export const sendEmail = async ({ to, subject, html, text, from, attachments, cc
     }
 };
 
-// Send bulk emails
 export const sendBulkEmail = async (emailList) => {
     const results = [];
 
     for (const emailData of emailList) {
         const result = await sendEmail(emailData);
         results.push(result);
-        // Add small delay to avoid rate limiting
         await new Promise(resolve => setTimeout(resolve, 100));
     }
 
@@ -131,4 +123,3 @@ export default {
     sendBulkEmail,
     verifyEmailConfig
 };
-

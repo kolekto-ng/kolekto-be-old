@@ -22,7 +22,7 @@ const toAddressList = (value) => {
   return list.filter(Boolean).map(addr => ({ email_address: { address: addr.trim() } }));
 };
 
-const sendAmbassadorViaHttpApi = async ({ to, subject, html, text, cc, bcc }) => {
+const sendViaHttpApi = async ({ to, subject, html, text, cc, bcc }) => {
   const apiKey = process.env.AMBASSADOR_SMTP_PASS;
   if (!apiKey) throw new Error('AMBASSADOR_SMTP_PASS not configured');
 
@@ -51,7 +51,7 @@ const sendAmbassadorViaHttpApi = async ({ to, subject, html, text, cc, bcc }) =>
   return { success: true, messageId: response.data?.messageId, response: response.data };
 };
 
-const sendAmbassadorViaSmtp = async ({ to, subject, html, text, attachments, cc, bcc }) => {
+const sendViaSmtp = async ({ to, subject, html, text, attachments, cc, bcc }) => {
   const transporter = createAmbassadorTransporter();
   const fromAddress = process.env.AMBASSADOR_SMTP_FROM || process.env.AMBASSADOR_SMTP_USER;
   const fromName = process.env.AMBASSADOR_SMTP_FROM_NAME || 'Kolekto Ambassador Program';
@@ -72,30 +72,27 @@ const sendAmbassadorViaSmtp = async ({ to, subject, html, text, attachments, cc,
 };
 
 export const verifyAmbassadorEmailConfig = async () => {
-  try {
-    const apiKey = process.env.AMBASSADOR_SMTP_PASS;
-    if (!apiKey) throw new Error('AMBASSADOR_SMTP_PASS not configured');
-    console.log('✅ [ambassador-mailer] HTTP API key configured');
-    return true;
-  } catch (error) {
-    console.error('❌ [ambassador-mailer] configuration error:', error?.message || error);
+  if (!process.env.AMBASSADOR_SMTP_PASS) {
+    console.error('❌ [ambassador-mailer] AMBASSADOR_SMTP_PASS not configured');
     return false;
   }
+  console.log('✅ [ambassador-mailer] ZeptoMail HTTP API token configured');
+  return true;
 };
 
 export const sendAmbassadorMail = async ({ to, subject, html, text, attachments, cc, bcc }) => {
   try {
     if (attachments) {
-      const result = await sendAmbassadorViaSmtp({ to, subject, html, text, attachments, cc, bcc });
+      const result = await sendViaSmtp({ to, subject, html, text, attachments, cc, bcc });
       return result;
     }
 
-    const result = await sendAmbassadorViaHttpApi({ to, subject, html, text, cc, bcc });
+    const result = await sendViaHttpApi({ to, subject, html, text, cc, bcc });
     return result;
   } catch (httpError) {
     console.warn('⚠️ [ambassador-mailer] HTTP API failed, falling back to SMTP:', httpError?.message || httpError);
     try {
-      const result = await sendAmbassadorViaSmtp({ to, subject, html, text, cc, bcc });
+      const result = await sendViaSmtp({ to, subject, html, text, cc, bcc });
       return result;
     } catch (smtpError) {
       console.error('❌ [ambassador-mailer] Error sending email:', smtpError?.message || smtpError);

@@ -22,7 +22,7 @@ const toAddressList = (value) => {
   return list.filter(Boolean).map(addr => ({ email_address: { address: addr.trim() } }));
 };
 
-const sendMarketingViaHttpApi = async ({ to, subject, html, text, cc, bcc }) => {
+const sendViaHttpApi = async ({ to, subject, html, text, cc, bcc }) => {
   const apiKey = process.env.MARKETING_SMTP_PASS;
   if (!apiKey) throw new Error('MARKETING_SMTP_PASS not configured');
 
@@ -51,7 +51,7 @@ const sendMarketingViaHttpApi = async ({ to, subject, html, text, cc, bcc }) => 
   return { success: true, messageId: response.data?.messageId, response: response.data };
 };
 
-const sendMarketingViaSmtp = async ({ to, subject, html, text, attachments, cc, bcc }) => {
+const sendViaSmtp = async ({ to, subject, html, text, attachments, cc, bcc }) => {
   const transporter = createMarketingTransporter();
   const fromAddress = process.env.MARKETING_SMTP_FROM || process.env.MARKETING_SMTP_USER;
   const fromName = process.env.MARKETING_SMTP_FROM_NAME || 'Kolekto';
@@ -72,30 +72,27 @@ const sendMarketingViaSmtp = async ({ to, subject, html, text, attachments, cc, 
 };
 
 export const verifyMarketingEmailConfig = async () => {
-  try {
-    const apiKey = process.env.MARKETING_SMTP_PASS;
-    if (!apiKey) throw new Error('MARKETING_SMTP_PASS not configured');
-    console.log('✅ [marketing-mailer] HTTP API key configured');
-    return true;
-  } catch (error) {
-    console.error('❌ [marketing-mailer] configuration error:', error?.message || error);
+  if (!process.env.MARKETING_SMTP_PASS) {
+    console.error('❌ [marketing-mailer] MARKETING_SMTP_PASS not configured');
     return false;
   }
+  console.log('✅ [marketing-mailer] ZeptoMail HTTP API token configured');
+  return true;
 };
 
 export const sendMarketingMail = async ({ to, subject, html, text, attachments, cc, bcc }) => {
   try {
     if (attachments) {
-      const result = await sendMarketingViaSmtp({ to, subject, html, text, attachments, cc, bcc });
+      const result = await sendViaSmtp({ to, subject, html, text, attachments, cc, bcc });
       return result;
     }
 
-    const result = await sendMarketingViaHttpApi({ to, subject, html, text, cc, bcc });
+    const result = await sendViaHttpApi({ to, subject, html, text, cc, bcc });
     return result;
   } catch (httpError) {
     console.warn('⚠️ [marketing-mailer] HTTP API failed, falling back to SMTP:', httpError?.message || httpError);
     try {
-      const result = await sendMarketingViaSmtp({ to, subject, html, text, cc, bcc });
+      const result = await sendViaSmtp({ to, subject, html, text, cc, bcc });
       return result;
     } catch (smtpError) {
       console.error('❌ [marketing-mailer] Error sending email:', smtpError?.message || smtpError);
